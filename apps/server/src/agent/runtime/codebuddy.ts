@@ -145,7 +145,7 @@ async function readSessionMap(cwd: string): Promise<SessionMap> {
   }
 }
 
-async function writeCodebuddyMd(cwd: string, canvas?: CanvasContext) {
+async function writeCodebuddyMd(cwd: string) {
   const path = join(cwd, "CODEBUDDY.md");
   let existing = "";
   try {
@@ -167,7 +167,12 @@ async function writeCodebuddyMd(cwd: string, canvas?: CanvasContext) {
     "- `openmem`：老大的偏好、规矩、本机环境、过往项目，动手前先查，不许凭印象猜。",
     "",
     `工作目录：${cwd}`,
-    `当前画布：${canvas?.id ?? "未连接（用 getAppState 查 connectionId）"}`,
+    // 🔴 这一行必须永远固定，绝不能写入 canvas.id 之类的动态值。
+    //    本文件会被 codebuddy 收进 system prompt（在内置指令+工具定义之后、对话历史之前），
+    //    一旦它每轮都变，40 万 token 的对话历史前缀缓存全部作废，一轮首跳从 0.4 分变 11 分
+    //    （2026-11-07 实测：缓存命中每次精准停在 25600 = 本文件之前的长度）。
+    //    画布 id 改放在本轮 user message 末尾（见 buildPrompt），不影响任何前缀。
+    "当前画布：见本轮消息末尾的 [当前画布 xxx]；没有就用 toonflow 的 getAppState 查 connectionId。",
     "",
     "## 全局协作规范",
     rules || "（未配置 AGENTS.md）",
@@ -175,6 +180,8 @@ async function writeCodebuddyMd(cwd: string, canvas?: CanvasContext) {
     MARKER_END,
     "",
   ].join("\n");
+  // 内容一字未变就不碰磁盘（mtime 不变），避免任何形式的「同内容重写」惊动缓存。
+  if (existing === body) return;
   await writeFile(path, body, "utf8");
 }
 
@@ -206,6 +213,8 @@ function buildPrompt(options: CodeBuddyAgentOptions, runId: string) {
   for (const item of options.mentions ?? []) {
     parts.push(`\n\n[提及 ${item.label}] ${JSON.stringify(item.value ?? item.source)}`);
   }
+  // 画布 id 放本条消息最末尾：不影响历史前缀缓存，agent 照样知道自己在哪个画布。
+  if (options.canvas?.id) parts.push(`\n\n[当前画布 ${options.canvas.id}]`);
   return parts.join("");
 }
 
@@ -218,7 +227,7 @@ export async function runCodeBuddyAgent(options: CodeBuddyAgentOptions, send: (e
   const { cwd, modelId, signal, onCancel } = options;
   const startedAt = Date.now();
   signal?.throwIfAborted();
-  await writeCodebuddyMd(cwd, options.canvas);
+  await writeCodebuddyMd(cwd);
   const tempDir = join(tmpdir(), `toonflow-codebuddy-${randomUUID()}`);
   const mcpConfigPath = await writeMcpConfig(tempDir);
 

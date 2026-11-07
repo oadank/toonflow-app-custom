@@ -3,6 +3,9 @@ import { createApp } from "./app";
 import config from "../../../electrobun.config";
 
 const startTime = Date.now();
+// [2026-11-07] 先把设置页保存的 CodeBuddy API Key 装进进程环境，早于任何 agent / CLI 子进程创建。
+const { loadCodebuddyKey } = await import("./utils/codebuddyKey");
+loadCodebuddyKey();
 const realPort = Number(process.env.TOONFLOW_SERVER_PORT || 3000);
 if (!Number.isInteger(realPort) || realPort < 1 || realPort > 65535) throw new Error("TOONFLOW_SERVER_PORT 必须是 1–65535 之间的整数");
 // 源码位于 apps/server/src，生产构建位于 build/server，均从文件位置定位根目录。
@@ -29,4 +32,7 @@ app.listen(realPort, async (error?: Error) => {
   await startMobileLinkRuntime(app).catch(error => console.error("设备互联启动失败：", error));
   console.log(`[服务启动成功]: http://localhost:${realPort}`);
   console.log(`[启动耗时]: ${(Date.now() - startTime).toFixed(2)}ms`);
+  // [2026-11-07] 接管重启前没跑完的生成任务（不阻塞监听，失败只记日志）。
+  const { default: u } = await import("./utils");
+  await u.mediaTasks.recoverPending().catch(error => console.error("[mediaTasks] 启动接管失败：", error));
 });

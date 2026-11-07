@@ -189,6 +189,7 @@ import route186 from "./routes/codebuddy/credits";
 import route187 from "./routes/deepseek/balance";
 import route188 from "./routes/asr/transcribe";
 import route189 from "./routes/agent/credits";
+import route190 from "./routes/codebuddy/account";
 
 export default (app: Express) => {
   app.use("/api/agent", route1);
@@ -378,6 +379,7 @@ export default (app: Express) => {
   app.use("/api/workspaces/list", route184);
   app.use("/api/workspaces/selectDirectory", route185);
   app.use("/api/codebuddy/credits", route186);
+  app.use("/api/codebuddy/account", route190);
   app.use("/api/deepseek/balance", route187);
   app.use("/api/asr/transcribe", route188);
 }
