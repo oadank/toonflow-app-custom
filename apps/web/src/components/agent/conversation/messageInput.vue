@@ -154,9 +154,9 @@ watch(running, (now, before) => {
   }
 });
 const locked = computed(() => props.disabled || props.submitting || props.stopping || props.deletingId !== undefined || restoringAttachment.value || voiceActive.value);
-const sendLabel = computed(() => running.value ? "排队发送" : editingId.value ? "重发消息" : "发送消息");
-const sendTitle = computed(() => running.value ? "排队发送，本轮完成后处理（Enter）；Ctrl/Cmd + Enter 引导当前任务" : `${sendLabel.value}（Enter）`);
-const placeholder = computed(() => running.value ? translate("输入文字，Enter 排队，Ctrl/Cmd + Enter 引导…") : voiceSupported ? translate("输入消息，点击语音按钮说话，@ 提及节点输出或全局素材…") : translate("输入消息，@ 提及节点输出或全局素材…"));
+const sendLabel = computed(() => running.value ? "引导发送" : editingId.value ? "重发消息" : "发送消息");
+const sendTitle = computed(() => running.value ? "引导当前任务，已完成的操作不会撤销（Enter）；Ctrl/Cmd + Enter 排队，本轮完成后处理" : `${sendLabel.value}（Enter）`);
+const placeholder = computed(() => running.value ? translate("输入文字，Enter 引导（插队），Ctrl/Cmd + Enter 排队…") : voiceSupported ? translate("输入消息，点击语音按钮说话，@ 提及节点输出或全局素材…") : translate("输入消息，@ 提及节点输出或全局素材…"));
 const { voiceSupported, voiceState, voiceText, voiceActive, voiceButtonLabel, voiceLevel, startVoiceInput, stopVoiceInput, cancelVoiceInput } = useVoiceInput({
   getSender: () => sender,
   active: () => props.active,
@@ -195,7 +195,8 @@ watch(running, value => {
   mentionMenuRef.value?.closeMenu();
 });
 
-function submitDraft(mode: "steer" | "followUp" = "followUp") {
+// 跑任务中途默认「引导（插队）」：Enter 直接插入当前任务，Ctrl/Cmd+Enter 才排队。
+function submitDraft(mode: "steer" | "followUp" = "steer") {
   if (locked.value || !props.active || (running.value && editingId.value)) return;
   if (running.value && (draftAttachments.value.length || sender?.getTagData().mention.length)) {
     ElMessage.warning("生成期间仅支持发送文字，请先移除附件和提及；当前草稿已保留");
@@ -242,7 +243,7 @@ function handleSenderKeydown(event: KeyboardEvent) {
   if (running.value && event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey) {
     event.preventDefault();
     event.stopPropagation();
-    submitDraft("steer");
+    submitDraft("followUp");
   }
 }
 

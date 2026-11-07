@@ -138,6 +138,15 @@ export function createConversationStream(messages: Ref<AgentMessage[]>) {
     stream = createReplyStream(message);
   }
 
+  // 中途插话（引导/排队）用：把当前这一步回复就地断开，让用户消息插在此处，
+  // 之后的内容由下一段流式另起一个气泡接上。
+  // 有工具正在执行时先不断——断开会把 running 误标成 interrupted，等它落地再断。
+  function cut() {
+    if (!reply) return;
+    if (reply.parts?.some(part => part.type === "tool" && part.tool.status === "running")) return;
+    finish();
+  }
+
   function ensureReply(userId?: string) {
     if (reply && userId && reply.replyTo && reply.replyTo !== userId) finish();
     if (!reply) {
@@ -189,5 +198,5 @@ export function createConversationStream(messages: Ref<AgentMessage[]>) {
     } else if (event.type === "done") finish();
   }
 
-  return { begin, receive, finish };
+  return { begin, receive, finish, cut };
 }

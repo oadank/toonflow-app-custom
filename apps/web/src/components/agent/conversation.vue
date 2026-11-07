@@ -135,6 +135,9 @@ const contextWindow = computed(() => contextUsage.value?.contextWindow ?? select
 function showQueuedUserMessage(message: AgentQueuedMessage, mode: "steer" | "followUp" = "steer") {
   if (messages.value.some(item => item.role === "user" && (item.queueId === message.id || item.id === message.id))) return;
   const user = messages.value.findLast(item => item.role === "user");
+  // 中途插话：先就地把正在生成的回复断开，让这条消息站到「发出去的那一刻」，
+  // 后续内容由流式层另起一个气泡接下去，不会把你的消息顶到最底下。
+  stream.cut();
   messages.value.push({
     id: message.id, queueId: message.id, role: "user", content: message.content,
     delivery: { mode, taskMessageId: user?.delivery?.taskMessageId ?? user?.entryId ?? user?.id ?? message.id },
@@ -261,7 +264,7 @@ async function attachCredits(message?: AgentMessage) {
 defineExpose({ receiveEvent, beginProjectStop, getRunId: () => runId, getSelectedModel: () => selectedModel.value });
 
 function submitMessage(mode?: "steer" | "followUp") {
-  if (busy.value || remoteRunning.value) return sendQueuedMessage(mode ?? "followUp");
+  if (busy.value || remoteRunning.value) return sendQueuedMessage(mode ?? "steer");
   return sendMessage(editingId.value ? messages.value.find(item => item.id === editingId.value) : undefined);
 }
 
