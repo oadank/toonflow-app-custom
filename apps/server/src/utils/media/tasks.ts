@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { dirname, join, relative } from "node:path";
-import { lstat, mkdir, readFile, realpath, writeAtomic } from "@toonflow/file";
+import { lstat, mkdir, readFile, readdir, realpath, writeAtomic } from "@toonflow/file";
 import type { ProviderTaskData } from "@toonflow/providers";
 import type { GeneratedMedia, MediaGenerationRequest } from "@toonflow/tools-scaffold/runtime";
 import { audioGenerationSchema, imageGenerationSchema, videoGenerationSchema } from "@/utils/media/schemas";
@@ -379,6 +379,25 @@ export async function status(cwd: string, taskIds: string[], resume = false) {
   }));
 }
 
+/**
+ * [2026-11-07] 停止生成时通知远端供应商真正停下。
+ * 适配器在提交时把 `cancelUrl` 和它自己的任务号写进了 providerData；这里直接回调，
+ * 不依赖 provider 在 abort 瞬间发请求——那一刻宿主正在收尾，连接会被掐断（实测全 500），
+ * 取消永远送不到，ComfyUI 就一直在后台烧卡。
+ */
+function notifyRemoteCancel(task: MediaTask) {
+  const info = task.record.checkpoint.providerData as { taskId?: unknown; cancelUrl?: unknown } | undefined;
+  const url = typeof info?.cancelUrl === "string" ? info.cancelUrl : "";
+  const taskId = typeof info?.taskId === "string" ? info.taskId : "";
+  if (!url || !taskId) return;
+  // 尽力而为：不 await、不重试，失败不影响本地取消结果（远端网关自己有兜底）。
+  void fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task_id: taskId }),
+  }).catch(() => {});
+}
+
 export async function cancel(cwd: string, taskIds: string[]) {
   cwd = await realpath(cwd);
   await Promise.all(taskIds.map(taskId => {
@@ -401,8 +420,86 @@ export async function cancel(cwd: string, taskIds: string[]) {
       task.record.result = error<GeneratedMedia[]>("生成已取消", null, 499);
       // 取消先落盘；包括尚未收到提交的 ID，防止乱序请求稍后创建付费任务。
       await persist(task, exclusive);
+      notifyRemoteCancel(task);
     });
   }));
+}
+
+// [2026-11-07] 停止生成时把该工作区里「还在跑」的媒体任务一起取消。
+// 画布节点走的是后台任务（带 taskId 的 /api/ai/media/generate 立刻返回），
+// 和 agent 运行完全解耦 —— 不显式取消，点了停止 ComfyUI 那边照样烧卡。
+export async function cancelRunning(cwd: string) {
+  cwd = await realpath(cwd);
+  const ids = new Set<string>();
+  for (const task of tasks.values()) {
+    if (identity(task.record.cwd) === identity(cwd) && task.record.state === "running") ids.add(task.record.taskId);
+  }
+  // 内存里没有的（进程重启过）从任务目录里补：只认 running，读不出来就跳过。
+  const folder = dirname(taskPath(cwd, "00000000-0000-0000-0000-000000000000"));
+  for (const name of await readdir(folder).catch(() => [] as string[])) {
+    const hex = /^task([0-9a-f]{32})\.json$/i.exec(name)?.[1];
+    if (!hex) continue;
+    const taskId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    if (ids.has(taskId)) continue;
+    try {
+      const task = await load(cwd, taskId, taskPath(cwd, taskId));
+      if (task?.record.state === "running") ids.add(taskId);
+    } catch { /* 记录损坏：不是这次要停的对象 */ }
+  }
+  if (!ids.size) return [];
+  await cancel(cwd, [...ids]);
+  return [...ids];
+}
+
+/**
+ * [2026-11-07] 服务启动时接管上次没跑完的生成任务。
+ *
+ * 之前的行为是「没人来查就永远不恢复」：内存任务表随进程清空，只有前端拿着画布里的
+ * taskId 回来查询时才会触发出恢复。用户重启服务后不打开那个画布，任务就成了僵尸——
+ * 供应商那边跑完了没人收片，节点一直显示「生成中」，只能放弃重跑，等于白烧一次算力。
+ *
+ * 这里在启动时扫一遍任务记录，把 state=running 的全部重新挂上轮询。
+ * 没有可恢复凭据的（进程死在提交途中）直接判失败，避免把节点锁死。
+ */
+export async function recoverPending() {
+  const root = join(dirname(conf.path), "mediaTasks");
+  const found: { cwd: string; taskId: string }[] = [];
+  for (const dir of await readdir(root).catch(() => [] as string[])) {
+    if (!dir.startsWith("workspace")) continue;
+    for (const name of await readdir(join(root, dir)).catch(() => [] as string[])) {
+      const hex = /^task([0-9a-f]{32})\.json$/i.exec(name)?.[1];
+      if (!hex) continue;
+      const taskId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+      try {
+        const stored = recordSchema.parse(JSON.parse((await readPrivateFile(join(root, dir, name), maxRecordSize)).toString("utf8")));
+        if (stored.state === "running") found.push({ cwd: stored.cwd, taskId: stored.taskId || taskId });
+      } catch { /* 旧版本或损坏记录：跳过，交回前端查询时的原有判定 */ }
+    }
+  }
+  if (!found.length) return 0;
+  let resumed = 0;
+  for (const item of found) {
+    try {
+      const cwd = await realpath(item.cwd);
+      const key = taskPath(cwd, item.taskId);
+      await locked(key, async () => {
+        const task = await load(cwd, item.taskId, key);
+        if (!task || task.active || task.record.state !== "running") return;
+        if (!await resumable(task)) {
+          task.record.state = "failed";
+          task.record.result = error<GeneratedMedia[]>("上次生成被服务重启中断，还没提交到供应商，直接重新生成即可", null, 409);
+          await persist(task);
+          return;
+        }
+        await launch(task, true);
+        resumed++;
+      });
+    } catch (cause) {
+      console.error("[mediaTasks] 启动接管任务失败", item.taskId, cause);
+    }
+  }
+  if (resumed) console.log(`[mediaTasks] 已接管 ${resumed} 个未完成的生成任务`);
+  return resumed;
 }
 
 const cleanupTimer = setInterval(() => {

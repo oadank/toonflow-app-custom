@@ -387,23 +387,82 @@ async function restoreTextAttachment(index: number) {
   }
 }
 
-function pasteAttachments(event: ClipboardEvent) {
-  const files = Array.from(event.clipboardData?.files ?? []);
-  if (!files.length && !running.value) {
+// [2026-11-07] 粘贴三路兜底。x-sender 自带的 paste 只认 text/plain，
+// 图片会被它 preventDefault 之后直接丢掉，而且它是 stopPropagation 的，
+// 所以必须在本层（capture）先拦下来自己处理：
+//   ① clipboardData.files —— 资源管理器复制文件、多数截图工具（PixPin/微信/QQ）
+//   ② clipboardData.items 里 kind=file —— 部分浏览器/输入法只在这里暴露文件
+//   ③ text/html 里的 <img src> —— 网页右键复制的图，剪贴板里没有真实文件，只有 HTML
+function clipboardFileList(data: DataTransfer) {
+  const files = Array.from(data.files ?? []);
+  if (files.length) return files;
+  for (const item of Array.from(data.items ?? [])) {
+    if (item.kind !== "file") continue;
+    const file = item.getAsFile();
+    if (file) files.push(file);
+  }
+  return files;
+}
+
+function htmlImageSources(html: string) {
+  if (!html) return [];
+  return Array.from(html.matchAll(/<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']/gi))
+    .map(match => (match[1] ?? "").replace(/&amp;/g, "&"))
+    .filter(src => /^(?:https?:\/\/|data:image\/|blob:)/i.test(src))
+    .slice(0, 20);
+}
+
+// 网页里的图是外链，跨域/防盗链会失败：失败就明确告诉用户存成文件再拖，不静默吞掉。
+async function attachRemoteImages(sources: string[]) {
+  const files: File[] = [];
+  for (const [index, src] of sources.entries()) {
     try {
-      const file = createPastedTextFile(event.clipboardData?.getData("text/plain") ?? "");
-      if (file) files.push(file);
-    } catch (error) {
+      const response = await fetch(src, { credentials: "include" });
+      if (!response.ok) continue;
+      const blob = await response.blob();
+      if (!blob.type.startsWith("image/")) continue;
+      const extension = (blob.type.split("/")[1] ?? "png").replace("jpeg", "jpg");
+      files.push(new File([blob], `${translate("粘贴图片")}-${index + 1}.${extension}`, { type: blob.type }));
+    } catch { /* 跨域或链接已失效，继续试下一张 */ }
+  }
+  if (files.length) addAttachments(files);
+  else ElMessage.warning("这张图取不到内容（多半是外链防盗链），请先另存为文件再拖进来");
+}
+
+function pasteAttachments(event: ClipboardEvent) {
+  const data = event.clipboardData;
+  if (!data) return;
+  const files = clipboardFileList(data);
+  if (files.length) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    addAttachments(files);
+    return;
+  }
+  const text = data.getData("text/plain") ?? "";
+  // 网页复制的图：没有真实文件、也没有正文，只有 text/html 里的 <img>。
+  // 必须在同步阶段就 preventDefault，否则 x-sender 会先把这次 paste 吃掉。
+  if (!text.trim() && !running.value) {
+    const sources = htmlImageSources(data.getData("text/html") ?? "");
+    if (sources.length) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      ElMessage.warning(error instanceof Error ? error.message : "无法添加文本附件");
+      void attachRemoteImages(sources);
       return;
     }
   }
-  if (!files.length) return;
-  event.preventDefault();
-  event.stopImmediatePropagation();
-  addAttachments(files);
+  if (running.value) return;
+  try {
+    const file = createPastedTextFile(text);
+    if (!file) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    addAttachments([file]);
+  } catch (error) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    ElMessage.warning(error instanceof Error ? error.message : "无法添加文本附件");
+  }
 }
 
 function selectAttachments(event: Event) {
@@ -448,7 +507,11 @@ function dropAttachments(event: DragEvent) {
 }
 
 function addAttachments(files: File[]) {
-  if (locked.value) return;
+  // [2026-11-07] 原来是 locked 时静默 return —— 粘上去毫无反应，看着就像"粘贴坏了"。
+  if (locked.value) {
+    if (props.active) ElMessage.warning("当前不能添加附件，请等本轮生成结束或停止后再试");
+    return;
+  }
   if (running.value) return ElMessage.warning("生成期间仅支持发送文字，请在本轮完成后添加附件");
   for (const file of files) {
     const readableMimeType = getReadableFileMimeType(file.name, file.type);
@@ -527,7 +590,14 @@ watch(senderElement, (element, _previous, onCleanup) => {
   editor.setAttribute("role", "textbox");
   editor.setAttribute("aria-label", translate("消息"));
   editor.setAttribute("aria-multiline", "true");
-  element.addEventListener("paste", pasteAttachments, true);
+  // [2026-11-07] 挂到 document 而不是输入框容器：截图后焦点常常还在别处（甚至输入框未聚焦），
+  // 绑在容器上就收不到 paste。用 contains 守卫，保证不抢节点提示词、设置页等其他输入框。
+  const onPaste = (event: Event) => {
+    const target = event.target as Node | null;
+    if (!target || !element.contains(target)) return;
+    pasteAttachments(event as ClipboardEvent);
+  };
+  document.addEventListener("paste", onPaste, true);
   window.addEventListener("dragend", resetAttachmentDrag, true);
   window.addEventListener("drop", resetAttachmentDrag, true);
   window.addEventListener("blur", resetAttachmentDrag);
@@ -539,7 +609,7 @@ watch(senderElement, (element, _previous, onCleanup) => {
     draftMentionTargets.value = [];
     sender = undefined;
     senderResize = undefined;
-    element.removeEventListener("paste", pasteAttachments, true);
+    document.removeEventListener("paste", onPaste, true);
     window.removeEventListener("dragend", resetAttachmentDrag, true);
     window.removeEventListener("drop", resetAttachmentDrag, true);
     window.removeEventListener("blur", resetAttachmentDrag);
