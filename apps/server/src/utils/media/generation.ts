@@ -45,6 +45,18 @@ function imageOptions(value: unknown, pattern: RegExp) {
   return Array.isArray(value) ? [...new Set(value.filter((item): item is string => typeof item === "string" && item.length <= 64 && item === item.trim() && pattern.test(item)))] : undefined;
 }
 
+/** [2026-11-05] 尺寸→真实比例的联动表。键必须在该模型的分辨率清单里，值必须是合法比例，
+ *  否则丢弃（防止供应商配置写错导致 UI 出现点不动的假比例）。 */
+function sizeRatioMap(value: unknown, sizes: string[] | undefined, ratios: string[] | undefined): Record<string, string> | undefined {
+  const source = record(value);
+  const out: Record<string, string> = {};
+  for (const key of sizes ?? []) {
+    const ratio = source[key];
+    if (typeof ratio === "string" && ratios?.includes(ratio)) out[key] = ratio;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 export async function listMediaModels(): Promise<MediaModel[]> {
   const installedProviders = await listMediaProviders();
   installedProviders.sort((left, right) => Number(right.id === "toonflow") - Number(left.id === "toonflow"));
@@ -60,6 +72,11 @@ export async function listMediaModels(): Promise<MediaModel[]> {
       ...(model.type === "image" ? {
         imageSizes: imageOptions(Array.isArray(model.imageSizes) ? model.imageSizes : builtIn?.imageSizes, /^[^\u0000-\u001f\u007f]+$/),
         imageRatios: imageOptions(Array.isArray(model.imageRatios) ? model.imageRatios : builtIn?.imageRatios, /^[1-9]\d{0,3}:[1-9]\d{0,3}$/),
+        sizeRatios: sizeRatioMap(
+          model.sizeRatios,
+          imageOptions(Array.isArray(model.imageSizes) ? model.imageSizes : builtIn?.imageSizes, /^[^\u0000-\u001f\u007f]+$/),
+          imageOptions(Array.isArray(model.imageRatios) ? model.imageRatios : builtIn?.imageRatios, /^[1-9]\d{0,3}:[1-9]\d{0,3}$/),
+        ),
       } : {}),
     } as MediaModel];
   }));
@@ -145,7 +162,9 @@ function resumableAssets(assets: MediaAsset[], mediaType: "image" | "video" | "a
 async function prepareRequest<T>(directory: string | undefined, mediaType: "image" | "video" | "audio", request: MediaGenerationRequest,
   read: (cwd: string, reference: MediaReference, type: string, signal?: AbortSignal) => Promise<T>, signal?: AbortSignal) {
   // ACT: 仅向已适配引用映射的内置供应商传递，其他第三方适配器仍接收原有公共参数。
-  const referenceOrder = mediaType === "video" && ["toonflow", "apiMart", "metaso", "compshare"].includes(request.providerId) ? request.referenceOrder : undefined;
+  // [2026-11-02] 加 comfyui8090（本地 ComfyUI 网关）：它的适配器需要 referenceOrder 才能
+  // 还原画布上「参考1=视频、参考2=图」的混类型顺序（否则只能按"先视频后图片"猜）。
+  const referenceOrder = mediaType === "video" && ["toonflow", "apiMart", "metaso", "compshare", "comfyui8090"].includes(request.providerId) ? request.referenceOrder : undefined;
   if (referenceOrder) {
     const media = { image: request.images, video: request.videos, audio: request.audios };
     for (const [index, reference] of referenceOrder.entries()) {
@@ -154,7 +173,8 @@ async function prepareRequest<T>(directory: string | undefined, mediaType: "imag
         : !!request[reference.type]);
       if (!available) invalid(`参考 ${index + 1} 指向的素材不存在，请重新选择引用`);
     }
-    for (const match of request.prompt.matchAll(/\{\{ref (\d+)\}\}/g)) {
+    // [2026-11-07] 槽位兼容：{{ref N}} 与作者版的 {{Mixed N}} 视为同一套引用编号。
+    for (const match of request.prompt.matchAll(/\{\{\s*(?:ref|Mixed)\s*(\d+)\s*\}\}/gi)) {
       if (!referenceOrder[Number(match[1]) - 1]) invalid(`引用标记 ${match[0]} 没有对应素材，请重新选择引用`);
     }
   }

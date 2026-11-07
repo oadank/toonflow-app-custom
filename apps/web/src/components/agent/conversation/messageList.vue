@@ -38,6 +38,7 @@
             <template #content>
               <div class="messageContent">
                 <span v-if="item.role === 'user' && item.delivery?.mode === 'steer'" class="steeringLabel" title="当前任务的补充引导，已完成的操作不会撤销"><icon-corner-down-right :size="14" aria-hidden="true" />引导</span>
+                <span v-else-if="item.role === 'user' && item.delivery?.mode === 'followUp'" class="steeringLabel" title="已进入队列，当前任务结束后按顺序处理"><icon-corner-down-right :size="14" aria-hidden="true" />排队</span>
                 <div v-if="item.report" class="reportHeader"><icon-users-group :size="14" />{{ item.report.name }} 上报</div>
                 <div v-if="item.agentMessage" class="reportHeader"><icon-users-group :size="14" />来自 {{ item.agentMessage.fromName }} 的消息</div>
                 <template v-for="part in item.parts" :key="part.id">
@@ -61,6 +62,10 @@
               </div>
             </template>
           </chat-item>
+          <div v-if="!item.streaming && item.role === 'assistant' && item.credits" class="creditPill" :title="item.credits.unit === 'cny' ? 'DeepSeek 官方账号余额 / 本轮估算消耗' : 'CodeBuddy 账号余额 / 本轮实扣积分'">
+            <template v-if="item.credits.unit === 'cny'">¥{{ money(item.credits.balance) }} · 本轮 ¥{{ money(item.credits.runCost, 4) }}</template>
+            <template v-else>{{ money(item.credits.balance) }} 分 · 本轮 {{ money(item.credits.runCost) }} 分</template>
+          </div>
           <div v-if="!item.streaming" class="messageActions">
             <template v-if="editingId === item.id">
               <el-button text size="small" :disabled="busy || deletingId !== undefined || voiceActive" @click="emit('cancelEdit')"><icon-x :size="14" />取消</el-button>
@@ -104,6 +109,11 @@ import "@tdesign-vue-next/chat/es/style/index.css";
 
 const props = defineProps<{ messages: AgentMessage[]; directory?: string; active: boolean; disabled: boolean; locked: boolean; busy: boolean; remoteRunning: boolean; compacting: boolean; editingId?: string; deletingId?: string; branchingId?: string; voiceActive: boolean }>();
 const emit = defineEmits<{ fillPrompt: [prompt: string]; copy: [content: string]; edit: [message: AgentMessage]; branch: [message: AgentMessage]; delete: [message: AgentMessage]; cancelEdit: [] }>();
+
+/** 消息下方余额 pill 的数值格式化：空值显示 —，其余按位数补齐。 */
+function money(value: number | null | undefined, digits = 2) {
+  return value === null || value === undefined ? "—" : Number(value).toFixed(digits);
+}
 const browserMessages = computed(() => {
   const groups = new Map<string, { id: string; tools: AgentToolCall[] }>();
   const taskIds = new Map<string, string>();
@@ -322,6 +332,13 @@ const welcomeSuggestions = [
             pointer-events: none;
           }
         }
+      }
+
+      .creditPill {
+        margin-top: 4px;
+        font-size: 12px;
+        color: var(--el-text-color-secondary);
+        opacity: 0.85;
       }
 
       .messageActions {

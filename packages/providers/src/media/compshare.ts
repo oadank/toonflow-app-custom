@@ -1201,7 +1201,7 @@ type VideoReferenceLabels = {
 };
 
 function referencePrompt(request: VideoRequest, labels: Partial<VideoReferenceLabels> = {}) {
-  return request.prompt.trim().replace(/\{\{ref (\d+)\}\}/g, (marker, number: string) => {
+  return request.prompt.trim().replace(/\{\{\s*(?:ref|Mixed)\s*(\d+)\s*\}\}/gi, (marker, number: string) => {
     const reference = request.referenceOrder?.[Number(number) - 1];
     if (!reference) throw new Error(`引用标记 ${marker} 缺少素材映射，请更新视频节点或提供 referenceOrder`);
     if (reference.type === "text") return `参考 ${Number(number)}`;

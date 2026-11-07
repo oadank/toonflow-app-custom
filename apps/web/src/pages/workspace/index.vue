@@ -169,7 +169,8 @@ const panelOptions = [
   { label: "画布", value: "canvas", icon: IconVector },
   { label: "文档", value: "document", icon: IconFileText },
 ];
-const agentVisible = ref(true);
+// [2026-11-05 老大令] 助手面板默认收起，别每次进来都占着画布；点右上角 Agent 按钮再展开
+const agentVisible = ref(false);
 const agentWidth = ref(0);
 const settingsVisible = ref(false);
 const helpVisible = ref(false);

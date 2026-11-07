@@ -72,7 +72,8 @@ import { onAgentStopped, stopAgent } from "@/lib/agentControl";
 import { writeClipboardText } from "@/lib/clipboard";
 import { showNotification } from "@/lib/notification";
 import anonymousData from "@/lib/anonymousData";
-import { modelChoices } from "@/stores/settings";
+import { modelChoices, defaultModelValue } from "@/stores/settings";
+import { deepSeekCostCNY } from "@/stores/deepseek";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { AgentAttachment, AgentConversation, AgentMessage } from "./types";
 import type { AgentEvent, AgentQueue, AgentQueuedMessage } from "@toonflow/server/agent/types";
@@ -91,6 +92,13 @@ const messages = ref<AgentMessage[]>((props.initialSession?.messages ?? []).map(
 const stream = createConversationStream(messages);
 const remoteRunning = ref(props.initialSession?.running ?? false);
 const stats = ref(props.initialSession?.stats);
+// stats.tokens 是整条分支的累计值，这里留快照，每轮结束用差值算「本轮」消耗。
+let lastStatsTokens = {
+  input: props.initialSession?.stats?.tokens?.input ?? 0,
+  output: props.initialSession?.stats?.tokens?.output ?? 0,
+  cacheRead: props.initialSession?.stats?.tokens?.cacheRead ?? 0,
+  cacheWrite: props.initialSession?.stats?.tokens?.cacheWrite ?? 0,
+};
 const contextUsage = ref(props.initialSession?.contextUsage);
 const busy = ref(false);
 const submitting = ref(false);
@@ -117,26 +125,31 @@ const pendingRunIds = new Set<string>();
 let connected = false;
 let receivingForwardedStream = false;
 const pendingMessage = props.initialSession?.parentFile ? undefined : workspaceStore.pendingAgentMessage;
-const selectedModel = ref(pendingMessage?.model ?? (props.initialSession?.providerId && props.initialSession.modelId
-  ? JSON.stringify([props.initialSession.providerId, props.initialSession.modelId]) : props.initialModel ?? ""));
+const selectedModel = ref(pendingMessage?.model ?? (props.initialSession?.providerId === "litellm"
+  ? defaultModelValue.value
+  : (props.initialSession?.providerId && props.initialSession.modelId
+    ? JSON.stringify([props.initialSession.providerId, props.initialSession.modelId]) : props.initialModel ?? "")));
 const reasoningEffort = ref(pendingMessage?.reasoningEffort ?? props.initialSession?.thinkingLevel ?? "");
 const selectedModelChoice = computed(() => modelChoices.value.find(item => item.value === selectedModel.value));
 const contextWindow = computed(() => contextUsage.value?.contextWindow ?? selectedModelChoice.value?.contextWindow ?? 262144);
-function showSteeringMessage(message: AgentQueuedMessage) {
+function showQueuedUserMessage(message: AgentQueuedMessage, mode: "steer" | "followUp" = "steer") {
   if (messages.value.some(item => item.role === "user" && (item.queueId === message.id || item.id === message.id))) return;
   const user = messages.value.findLast(item => item.role === "user");
   messages.value.push({
     id: message.id, queueId: message.id, role: "user", content: message.content,
-    delivery: { mode: "steer", taskMessageId: user?.delivery?.taskMessageId ?? user?.entryId ?? user?.id ?? message.id },
+    delivery: { mode, taskMessageId: user?.delivery?.taskMessageId ?? user?.entryId ?? user?.id ?? message.id },
   });
 }
-
-for (const message of queue.value.steering) showSteeringMessage(message);
+// ACT: 排队（followUp）以前只在输入框上方的队列条里露脸，聊天流里什么都不显示，
+// 用户发完看不到自己发了什么。这里让它和「引导」一样立刻进消息流，靠 delivery.mode 区分标签。
+for (const message of queue.value.steering) showQueuedUserMessage(message, "steer");
+for (const message of queue.value.followUp) showQueuedUserMessage(message, "followUp");
 
 function applyQueue(next: AgentQueue) {
   if (!runId || next.runId !== runId || (next.runId === queue.value.runId && next.revision <= queue.value.revision)) return;
   queue.value = { runId: next.runId, revision: next.revision, steering: next.steering, followUp: next.followUp };
-  for (const message of next.steering) showSteeringMessage(message);
+  for (const message of next.steering) showQueuedUserMessage(message, "steer");
+  for (const message of next.followUp) showQueuedUserMessage(message, "followUp");
 }
 
 function clearQueue() {
@@ -196,11 +209,53 @@ function receiveEvent(event: AgentEvent) {
   }
   applyEvent(event);
   if (event.type === "done" || event.type === "error") {
+    void attachCredits(messages.value.slice().reverse().find(message => message.role === "assistant"));
     // 历史快照尚未接入实时归并器时，也要结束其中保留的生成状态。
     for (const message of messages.value) {
       if (message.role === "assistant" && message.streaming) createReplyStream(message).finish();
     }
   }
+}
+
+/** 每轮结束把余额 + 本轮消耗挂到该条 assistant 消息上，并写进会话文件（刷新后 pill 仍在）。 */
+async function attachCredits(message?: AgentMessage) {
+  if (!message || message.role !== "assistant" || message.credits) return;
+  // 计费体系不同：codebuddy 系 = CodeBuddy 账号积分（CLI 实扣）；main(litellm) = DeepSeek 官方余额（按 token 估算）。
+  const provider = selectedModelChoice.value?.providerId;
+  try {
+    let credits: { balance: number | null; runCost: number | null; unit: "cny" | "credit" } | undefined;
+    if (provider === "codebuddy") {
+      const { data } = await axios.get("/api/codebuddy/credits", { timeout: 30000 });
+      if (data.code === 200) {
+        credits = { balance: data.data.officialBalance ?? null, runCost: data.data.runCost ?? null, unit: "credit" };
+      }
+    } else {
+      const { data } = await axios.get("/api/deepseek/balance", { timeout: 30000 });
+      if (data?.code === 200) {
+        const tokens = stats.value?.tokens;
+        const current = { input: tokens?.input ?? 0, output: tokens?.output ?? 0, cacheRead: tokens?.cacheRead ?? 0, cacheWrite: tokens?.cacheWrite ?? 0 };
+        // stats 是累计值，差值才是本轮；compaction/分支回退可能让差值变负，按 0 兜底。
+        const delta = {
+          input: Math.max(0, current.input - lastStatsTokens.input),
+          output: Math.max(0, current.output - lastStatsTokens.output),
+          cacheRead: Math.max(0, current.cacheRead - lastStatsTokens.cacheRead),
+          cacheWrite: Math.max(0, current.cacheWrite - lastStatsTokens.cacheWrite),
+        };
+        lastStatsTokens = current;
+        credits = { balance: data.data?.total ?? null, runCost: deepSeekCostCNY(delta), unit: "cny" };
+      }
+    }
+    if (!credits) return;
+    message.credits = credits;
+    // 落盘：刷新后 /api/agent/get 会把这条 credits 挂回同一条消息。
+    const dir = directory ?? workspaceStore.project?.directory;
+    if (dir && props.sessionFile && (message.entryId || message.id)) {
+      void axios.post("/api/agent/credits", {
+        directory: dir, sessionFile: props.sessionFile,
+        messageId: message.entryId ?? message.id, ...credits,
+      }, { headers: { "x-toonflow-workspace": "1" } }).catch(() => { /* 落盘失败不影响对话 */ });
+    }
+  } catch { /* 计费服务不可用不影响对话 */ }
 }
 
 defineExpose({ receiveEvent, beginProjectStop, getRunId: () => runId, getSelectedModel: () => selectedModel.value });
@@ -240,7 +295,7 @@ async function sendQueuedMessage(streamingBehavior: "steer" | "followUp") {
     for await (const event of readAgentEvents(response, requestController.signal)) {
       if (event.type !== "accepted" || event.runId !== expectedRunId) continue;
       accepted = true;
-      if (event.message?.mode === "steer") showSteeringMessage(event.message);
+      if (event.message) showQueuedUserMessage(event.message, event.message.mode);
       const currentDraft = instance.getDraft();
       if (input.value === instance && currentDraft.prompt === draft.prompt && !currentDraft.attachments.length && !currentDraft.mentionedIds.length) {
         await instance.clearDraft();
@@ -269,7 +324,8 @@ async function sendQueuedMessage(streamingBehavior: "steer" | "followUp") {
             receivingForwardedStream = false;
             compacting.value = false;
             queue.value = session.queue ?? { runId: session.runId ?? "", revision: 0, steering: [], followUp: [] };
-            for (const message of queue.value.steering) showSteeringMessage(message);
+            for (const message of queue.value.steering) showQueuedUserMessage(message, "steer");
+            for (const message of queue.value.followUp) showQueuedUserMessage(message, "followUp");
             message = "会话状态已更新，草稿已保留，请重新发送";
             refreshed = true;
           }
@@ -321,7 +377,7 @@ async function updateQueuedMessage(message: AgentQueuedMessage, action: "steer" 
     });
     if (data.code !== 200) throw new Error(data.message || "操作排队消息失败");
     applyQueue(data.data.queue);
-    if (action === "steer") showSteeringMessage(data.data.message ?? message);
+    if (action === "steer") showQueuedUserMessage(data.data.message ?? message, "steer");
     if (action === "edit") await instance.fillQueuedMessage(data.data.message?.content ?? message.content);
   } catch (error) {
     if (axios.isAxiosError(error) && !error.response) {
@@ -670,6 +726,7 @@ async function sendMessage(source?: AgentMessage) {
       }).catch(() => {});
     }
     if (ownsStream && !forwarded && !isSuperseded()) stream.finish();
+    if (!isSuperseded()) void attachCredits(messages.value.slice().reverse().find(message => message.role === "assistant"));
     if (!isSuperseded() && stoppedRunIds.has(requestRunId) && (!runId || runId === requestRunId)) {
       remoteRunning.value = false;
       runId = undefined;

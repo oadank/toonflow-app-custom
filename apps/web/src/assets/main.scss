@@ -63,3 +63,29 @@ body,
 *::-webkit-scrollbar-track {
   background-color: transparent;
 }
+
+/* [2026-11-05 老大令] 全屏看图：图上抓手可拖动、图外用缩小光标（点一下关闭）、关闭按钮保留默认
+   el-image-viewer 默认已有：点遮罩关闭、右上角 ×、滚轮缩放、拖动平移；这里只补光标语义。 */
+/* canvas 全屏盖在 mask 上面，所以「图外」的命中目标是 canvas，不是 mask */
+.el-image-viewer__canvas {
+  cursor: zoom-out;
+}
+
+.el-image-viewer__canvas img {
+  cursor: grab;
+}
+
+.el-image-viewer__canvas img:active {
+  cursor: grabbing;
+}
+
+/* 图片外的遮罩区域：缩小光标 = 点一下就退出全屏 */
+.el-image-viewer__mask {
+  cursor: zoom-out;
+}
+
+/* 关闭按钮保持可见、可点（默认 40px 圆形，这里只确保层级不被遮罩吃掉） */
+.el-image-viewer__close {
+  z-index: 2;
+  cursor: pointer;
+}

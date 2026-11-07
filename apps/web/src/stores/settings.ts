@@ -151,6 +151,13 @@ export const modelChoices = computed(() => customProviders.value.flatMap(provide
   reasoningLevels: resolvedModelReasoning.value[JSON.stringify([provider.id, model.id])],
 }))));
 
+// 强制默认模型：优先 CodeBuddy 本机的 deepseek-v4.1-flash（新内核引擎），覆盖任何残留偏好。
+// 旧对话若显式存过别的模型仍尊重之；仅在未指定时回落到此处。
+export const defaultModelValue = computed(() => {
+  const target = modelChoices.value.find(choice => choice.providerId === "codebuddy" && choice.modelId === "deepseek-v4.1-flash");
+  return target?.value ?? modelChoices.value[0]?.value ?? "";
+});
+
 function applyModelReasoning(models: ResolvedAiModel[]) {
   resolvedModelReasoning.value = Object.fromEntries(models.map(model => [JSON.stringify([model.providerId, model.modelId]), model.reasoningLevels]));
 }

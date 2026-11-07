@@ -7,6 +7,8 @@
     :downloadUrl="downloadUrl"
     :downloadName="`${nodeProps.label || '文本'}.md`"
     :bottomWidth="660"
+    previewLabel="编辑文本"
+    @preview="editing = true"
     @fullscreen="fullscreen = true; editing = true">
     <div class="textContent" :class="{ empty: !outputs.text.value.trim(), resized }">
       <el-alert v-if="documentState.error" :title="documentState.error" type="error" :closable="false" showIcon>

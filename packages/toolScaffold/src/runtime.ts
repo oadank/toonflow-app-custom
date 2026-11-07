@@ -88,6 +88,8 @@ export interface MediaModel {
   mode?: unknown;
   imageSizes?: string[];
   imageRatios?: string[];
+  /** [2026-11-05] 尺寸 → 真实比例（如 {"2048x1536":"4:3"}），节点用它做尺寸框/比例框联动。 */
+  sizeRatios?: Record<string, string>;
   durationResolutionMap?: { duration: number[]; resolution: string[] }[];
   audio?: boolean | "optional";
   voices?: { title: string; voice: string }[];

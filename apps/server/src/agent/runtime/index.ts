@@ -9,7 +9,8 @@ import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { CanvasContext, QuestionContext } from "@toonflow/tools-scaffold/runtime";
 import type { AgentEvent, AgentMention, AgentPeerMessage, AgentToolCall } from "@/agent/runtime/types";
 import { agentMentionsSchema, mentionPrompt, snapshotMentions, validateMentionTokens } from "@/agent/runtime/mentions";
-import { readAiReferences, referenceContent } from "@/utils/ai";
+import { readAiReferences, referenceContent, getConfiguredProviders } from "@/utils/ai";
+import { runCodeBuddyAgent, getActiveCodebuddyRun, enqueueCodebuddyInput } from "@/agent/runtime/codebuddy";
 import { createAgentTools } from "@/agent/tools";
 import { createAgentResources } from "@/agent/runtime/resources";
 import { createAgentModel, getAgentModelConfiguration } from "@/agent/runtime/model";
@@ -80,6 +81,27 @@ export async function run(
   mentions = agentMentionsSchema.parse(mentions);
   validateMentionTokens(prompt, mentions);
   if (!prompt.trim() && !attachments.length && !mentions.length) throw Object.assign(new Error("请输入消息、提及或添加附件"), { status: 400 });
+  // CodeBuddy 引擎：整轮交给本机 codebuddy.exe，不走 pi-coding-agent 的 ModelRuntime。
+  const rawProvider = getConfiguredProviders().find(item => item?.id === providerId) as { protocol?: string } | undefined;
+  if (rawProvider?.protocol === "codebuddy-cli") {
+    // 运行中又来消息：外挂进程不排队就会并发起两个子进程（乱套）。
+    // steer = 立即杀掉当前轮、带 --resume 把新消息作为下一轮重开；followUp = 当前轮结束后再续跑。
+    // 具体循环在 codebuddy.ts 的 runCodeBuddyAgent 里；这里只负责入队并回 accepted。
+    if (sessionFile && streamingBehavior) {
+      const active = getActiveCodebuddyRun(sessionFile);
+      if (active && (!expectedRunId || active.runId === expectedRunId)) {
+        const id = crypto.randomUUID();
+        enqueueCodebuddyInput(sessionFile, { id, prompt: prompt.trim(), mode: streamingBehavior });
+        send({ type: "accepted", runId: active.runId, message: { id, content: prompt.trim(), mode: streamingBehavior } });
+        return;
+      }
+    }
+    await runCodeBuddyAgent({
+      prompt, attachments, mentions, cwd, providerId, modelId, thinkingLevel,
+      sessionFile, runId, canvas, signal, onCancel,
+    }, send);
+    return;
+  }
   getAgentModelConfiguration(providerId, modelId, thinkingLevel);
   const attachmentContents: (z.infer<typeof agentAttachmentsSchema>[number] & { content?: string })[] = [];
   for (const attachment of attachments) {

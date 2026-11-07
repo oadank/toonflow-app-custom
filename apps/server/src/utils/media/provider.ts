@@ -31,6 +31,7 @@ export const mediaModelsSchema = z.array(z.object({
   rules: providerRulesSchema.optional(),
   imageSizes: z.array(z.string()).optional(),
   imageRatios: z.array(z.string()).optional(),
+  sizeRatios: z.record(z.string(), z.string()).optional(),
   durationResolutionMap: z.array(z.object({
     duration: z.array(z.number()),
     resolution: z.array(z.string()),

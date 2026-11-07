@@ -27,7 +27,7 @@ export const reasoningEffortsSchema = z.union([
 export const providerSchema = z.object({
   apiUrl: z.url({ protocol: /^https?$/ }),
   apiKey: z.string(),
-  protocol: z.enum(["openai-completions", "openai-responses", "anthropic-messages"]),
+  protocol: z.enum(["openai-completions", "openai-responses", "anthropic-messages", "codebuddy-cli"]),
   maxRequestImageBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
   maxRequestBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
   models: z.array(z.object({

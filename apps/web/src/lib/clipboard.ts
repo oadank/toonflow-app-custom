@@ -34,13 +34,16 @@ function clipboardFile(type: string, base64: string, name: string) {
 
 export async function readClipboardFiles(): Promise<File[]> {
   if (actualPlatform.isDesktop) {
-    const { data } = await axios.post<{ code: number; data: { files: { name: string; mimeType: string; data: string }[] }; message: string }>(
-      "/api/desktop/clipboard/read",
-      { format: "files" },
-      { headers }
-    );
-    if (data.code !== 200) throw new Error(data.message || "读取剪贴板文件失败");
-    return data.data.files.map(file => clipboardFile(file.mimeType, file.data, file.name));
+    // [2026-11-04 修] 远程网页模式（?remote=1）下 isDesktop 仍为 true，但桌面剪贴板桥不可用，
+    // 以前直接抛错 → 每次读剪贴板都弹一条「Network Error」。现在桥失败就退回浏览器剪贴板。
+    try {
+      const { data } = await axios.post<{ code: number; data: { files: { name: string; mimeType: string; data: string }[] }; message: string }>(
+        "/api/desktop/clipboard/read",
+        { format: "files" },
+        { headers }
+      );
+      if (data.code === 200) return data.data.files.map(file => clipboardFile(file.mimeType, file.data, file.name));
+    } catch { /* 落到下面的浏览器剪贴板 */ }
   }
   if (!navigator.clipboard?.read) throw new Error("当前环境不支持读取剪贴板文件");
   const files: File[] = [];
@@ -90,7 +93,13 @@ export async function writeClipboardImage(image: Blob): Promise<void> {
   await navigator.clipboard.write([new ClipboardItem({ "image/png": await imagePngBlob(image) })]);
 }
 export async function writeClipboardText(text: string): Promise<void> {
+  // [2026-11-04 修] 远程网页模式（?remote=1）下 isDesktop 仍为 true，会去调 /api/desktop/clipboard/write，
+  // 但那个桥只在桌面壳里可用，远程走网页时必然失败 → 用户看到「复制失败，请重试」。
+  // 现在后端写入失败一律回退到浏览器剪贴板，两条路都试过才算失败。
   if (!actualPlatform.isDesktop) return navigator.clipboard.writeText(text);
-  const { data } = await axios.post<{ code: number; message: string }>("/api/desktop/clipboard/write", { text }, { headers });
-  if (data.code !== 200) throw new Error(data.message || "写入剪贴板失败");
+  try {
+    const { data } = await axios.post<{ code: number; message: string }>("/api/desktop/clipboard/write", { text }, { headers });
+    if (data.code === 200) return;
+  } catch { /* 远程网页下这个桥不可用，落到下面走浏览器剪贴板 */ }
+  await navigator.clipboard.writeText(text);
 }

@@ -22,6 +22,15 @@ import { createAssetContext } from "@/agent/assets";
 import { readDocument } from "@/utils/documents";
 import { createMcpAgentTools } from "@/utils/mcp/servers";
 
+// [2026-11-04] 只读白名单根目录：技能真源等「工作区外但 agent 必须能读」的位置。
+// 环境变量 TOONFLOW_EXTRA_READ_ROOTS 可用分号分隔覆盖；只影响读取，写入仍锁在工作区内。
+// [2026-11-04 老大令] agent 文件权限全开（读写不限工作区）。设 TOONFLOW_FULL_ACCESS=0 可收回。
+const FULL_ACCESS = process.env.TOONFLOW_FULL_ACCESS !== '0';
+
+const EXTRA_READ_ROOTS: string[] = (process.env.TOONFLOW_EXTRA_READ_ROOTS
+  ?? ['C:/D/opt/agents-to-feishu/skills', 'C:/D/opt/drama-skills', 'C:/D/opt/Toonflow/data/skills'].join(';'))
+  .split(';').map(item => item.trim()).filter(Boolean).map(item => resolve(item));
+
 export function createAgentToolContext(cwd: string, config: Record<string, unknown> = {}, canvas?: CanvasContext, question?: QuestionContext, workspaceAvailable = true): ToolContext {
   const sourceCanvas = canvas;
   if (sourceCanvas) {
@@ -44,9 +53,15 @@ export function createAgentToolContext(cwd: string, config: Record<string, unkno
   const skillsDirectory = join(dirname(conf.path), "skills");
   const requireWorkspace = () => { if (!workspaceAvailable) throw new Error("此对话未提供工作目录，无法使用文件或媒体操作"); };
   const resolvePath = async (path: string, readOnly = false) => {
-    requireWorkspace();
     const absolute = resolve(cwd, path);
-    const root = readOnly && isWithin(skillsDirectory, absolute) ? skillsDirectory : cwd;
+    // [2026-11-04 老大令] 给 agent 最大文件权限：不限工作区，读写任意绝对路径。
+    // 想收回限制时设 TOONFLOW_FULL_ACCESS=0，会退回下面的白名单逻辑。
+    if (FULL_ACCESS) return absolute;
+    requireWorkspace();
+    const extraRoot = readOnly
+      ? EXTRA_READ_ROOTS.find(dir => absolute === dir || isWithin(dir, absolute))
+      : undefined;
+    const root = extraRoot ?? (readOnly && isWithin(skillsDirectory, absolute) ? skillsDirectory : cwd);
     return (await resolveWorkspacePath(root, relative(root, absolute), true)).path;
   };
   const withWritePaths = async (paths: string[], operation: (targets: string[]) => Promise<void>) => {

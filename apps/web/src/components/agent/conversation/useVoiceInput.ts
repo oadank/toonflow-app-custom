@@ -1,9 +1,15 @@
 import { computed, onScopeDispose, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { translate } from "@toonflow/i18n/vue";
-import { createBrowserAsr, isBrowserAsrSupported, type BrowserAsrState } from "@toonflow/asr";
 import type xSender from "x-sender";
 
+type VoiceState = "idle" | "recording" | "transcribing";
+
+/**
+ * 闪电语音输入：本地 ASR（本机 sherpa-onnx / SenseVoice，经 Toonflow server 代理 /api/asr/transcribe）。
+ * 不依赖浏览器或 Google 语音识别服务，离线可用、秒级返回。
+ * 录音用 MediaRecorder，停止后把音频发到服务端落盘再交本地 ASR 识别，文本回填到输入框。
+ */
 export default function useVoiceInput(options: {
   getSender: () => xSender | undefined;
   active: () => boolean;
@@ -11,50 +17,66 @@ export default function useVoiceInput(options: {
   locked: () => boolean;
   onStart: () => void;
 }) {
-  const voiceSupported = isBrowserAsrSupported();
-  const voiceState = ref<BrowserAsrState>("idle");
+  const voiceSupported = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
+  const voiceState = ref<VoiceState>("idle");
   const voiceText = ref("");
   const voiceLevel = ref(0);
+  const voiceBars = ref<number[]>([]);
   const voiceActive = computed(() => voiceState.value !== "idle");
-  const voiceButtonLabel = computed(() => !voiceSupported ? "当前浏览器不支持原生语音识别" : voiceActive.value ? "取消语音输入" : "长按输入框语音输入，也可点击开始");
-  let voiceAsr: ReturnType<typeof createBrowserAsr> | undefined;
+  const voiceButtonLabel = computed(() =>
+    !voiceSupported
+      ? "当前环境无法访问麦克风，无法使用语音输入"
+      : voiceActive.value
+        ? "正在聆听，点击结束并识别"
+        : "闪电语音输入：点击说话，再点结束");
+
+  let mediaStream: MediaStream | undefined;
+  let recorder: MediaRecorder | undefined;
+  let chunks: BlobPart[] = [];
   let voicePress: { pointerId: number; x: number; y: number; timer: number } | undefined;
-  let voiceFinalText = "";
   let meterRun = 0;
   let meterFrame = 0;
-  let meterStream: MediaStream | undefined;
   let meterContext: AudioContext | undefined;
+  let cancelled = false;
+  let currentInstance: xSender | undefined;
+  let currentPosition: ReturnType<xSender["getCurrentNode"]> | undefined;
 
-  function stopVoiceMeter() {
+  // 只停「电平动画」，不碰麦克风轨道。可随时调用。
+  function haltMeter() {
     meterRun++;
     cancelAnimationFrame(meterFrame);
     meterFrame = 0;
     voiceLevel.value = 0;
-    meterStream?.getTracks().forEach(track => track.stop());
-    meterStream = undefined;
-    const context = meterContext;
-    meterContext = undefined;
-    if (context && context.state !== "closed") void context.close().catch(error => console.warn("关闭麦克风音量采集失败", error));
+    voiceBars.value = [];
   }
 
-  async function startVoiceMeter(asr: ReturnType<typeof createBrowserAsr>) {
-    stopVoiceMeter();
+  // 停表 + 释放麦克风。只能在 MediaRecorder 正常 stop（容器收尾）之后调用——
+  // 提前停轨道会让 webm 被截断，ffmpeg 解析崩溃（exit 3753488571 / 3199971767）。
+  function stopVoiceMeter() {
+    haltMeter();
+    mediaStream?.getTracks().forEach(track => track.stop());
+    mediaStream = undefined;
+    const context = meterContext;
+    meterContext = undefined;
+    if (context && context.state !== "closed") void context.close().catch(() => {});
+  }
+
+  function startVoiceMeter(stream: MediaStream) {
+    // 这里绝不能停 mediaStream 的轨道——它正是刚拿到的新麦克风流。
+    // 只清掉上一轮的电平动画与旧 AudioContext。
+    haltMeter();
+    const prevContext = meterContext;
+    meterContext = undefined;
+    if (prevContext && prevContext.state !== "closed") void prevContext.close().catch(() => {});
     const run = meterRun;
     try {
-      if (!navigator.mediaDevices?.getUserMedia || typeof AudioContext === "undefined") throw new Error("当前环境无法读取麦克风音量");
+      if (typeof AudioContext === "undefined") return;
       const context = new AudioContext();
       meterContext = context;
-      const media = await navigator.mediaDevices.getUserMedia({ audio: true });
-      if (run !== meterRun || voiceAsr !== asr) {
-        media.getTracks().forEach(track => track.stop());
-        return;
-      }
-      meterStream = media;
-      if (context.state === "suspended") await context.resume();
-      if (run !== meterRun || voiceAsr !== asr) return;
+      if (context.state === "suspended") void context.resume();
       const analyser = context.createAnalyser();
       analyser.fftSize = 512;
-      context.createMediaStreamSource(media).connect(analyser);
+      context.createMediaStreamSource(stream).connect(analyser);
       const samples = new Uint8Array(analyser.fftSize);
       let lastUpdate = 0;
       function updateLevel(now: number) {
@@ -68,18 +90,18 @@ export default function useVoiceInput(options: {
             const rms = Math.sqrt(sum / samples.length);
             const level = Math.max(0, Math.min(1, (20 * Math.log10(Math.max(rms, 0.0001)) + 60) / 48));
             voiceLevel.value = Math.max(level, voiceLevel.value * 0.75);
+            const n = 9;
+            voiceBars.value = new Array(n).fill(0).map((_, i) =>
+              Math.max(0.15, Math.min(1, level * (0.6 + 0.4 * Math.sin(now / 120 + i * 0.7)) + 0.1)));
           }
           meterFrame = requestAnimationFrame(updateLevel);
-        } catch (error) {
+        } catch {
           stopVoiceMeter();
-          console.warn("无法读取麦克风音量", error);
         }
       }
       meterFrame = requestAnimationFrame(updateLevel);
-    } catch (error) {
-      if (run !== meterRun) return;
+    } catch {
       stopVoiceMeter();
-      console.warn("无法读取麦克风音量", error);
     }
   }
 
@@ -99,19 +121,21 @@ export default function useVoiceInput(options: {
     if (voicePress?.pointerId === event.pointerId && !voiceActive.value && Math.hypot(event.clientX - voicePress.x, event.clientY - voicePress.y) > 8) clearVoicePress();
   }
 
-  function stopVoiceInput() {
-    clearVoicePress();
-    stopVoiceMeter();
-    try {
-      voiceAsr?.stop();
-    } catch (error) {
-      cancelVoiceInput();
-      ElMessage.warning(error instanceof Error ? error.message : "无法结束语音识别");
-    }
-  }
-
   function releaseVoicePress(event: PointerEvent) {
     if (voicePress?.pointerId === event.pointerId) stopVoiceInput();
+  }
+
+  function cleanupRecorder() {
+    try { recorder?.stream.getTracks().forEach(track => track.stop()); } catch { /* 已停止 */ }
+    recorder = undefined;
+    mediaStream = undefined;
+  }
+
+  function resetState() {
+    voiceState.value = "idle";
+    voiceText.value = "";
+    stopVoiceMeter();
+    cleanupRecorder();
   }
 
   function cancelVoiceInput(event?: Event) {
@@ -119,16 +143,70 @@ export default function useVoiceInput(options: {
     if (event?.type === "visibilitychange" && !document.hidden) return;
     if (event instanceof KeyboardEvent && voiceActive.value) event.preventDefault();
     clearVoicePress();
-    stopVoiceMeter();
-    const asr = voiceAsr;
-    voiceAsr = undefined;
-    voiceState.value = "idle";
-    voiceText.value = "";
-    voiceFinalText = "";
+    cancelled = true;
+    haltMeter();
+    if (recorder && recorder.state !== "inactive") {
+      // 先让 MediaRecorder 正常收尾（onstop → finishTranscribe → resetState 才释放麦克风）。
+      // 这里提前停轨道会让 webm 截断，必须避免。
+      try { recorder.stop(); } catch { resetState(); }
+    } else {
+      resetState();
+    }
+  }
+
+  function stopVoiceInput() {
+    clearVoicePress();
+    cancelled = false;
+    haltMeter();
+    if (recorder && recorder.state !== "inactive") {
+      try { recorder.stop(); } catch { void finishTranscribe(); }
+    } else {
+      void finishTranscribe();
+    }
+  }
+
+  async function uploadAudio(blob: Blob): Promise<string> {
+    const ext = blob.type.includes("webm") ? "webm"
+      : blob.type.includes("ogg") ? "ogg"
+      : blob.type.includes("mp4") ? "mp4"
+      : blob.type.includes("wav") ? "wav"
+      : blob.type.includes("mpeg") ? "mp3"
+      : "webm";
+    const res = await fetch(`/api/asr/transcribe?ext=${ext}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream", "x-toonflow-workspace": "1" },
+      body: blob,
+    });
+    const json = await res.json() as { code?: number; data?: { text?: string }; message?: string };
+    if (json?.code === 200 && json.data) return json.data.text ?? "";
+    throw new Error(json?.message || `语音识别服务返回 ${res.status}`);
+  }
+
+  async function finishTranscribe() {
+    const instance = currentInstance;
+    const position = currentPosition;
+    const mime = recorder?.mimeType || "audio/webm";
+    const blob = chunks.length ? new Blob(chunks, { type: mime }) : null;
+    chunks = [];
+    if (cancelled || !blob) { resetState(); recorder = undefined; return; }
+    voiceState.value = "transcribing";
     try {
-      asr?.destroy();
+      const text = await uploadAudio(blob);
+      voiceText.value = text;
+      if (!text || !instance || options.getSender() !== instance || !options.active() || options.disabled()) return;
+      instance.enable();
+      const pos = position as { instance?: { $el: HTMLElement; focus: (n: number) => void }; offset?: number } | undefined;
+      if (pos?.instance && instance.chatElement.richText.contains(pos.instance.$el)) {
+        pos.instance.focus(Math.min(pos.offset ?? 0, pos.instance.$el.textContent?.length ?? 0));
+      } else {
+        instance.focus("last");
+      }
+      await instance.setText(text);
     } catch (error) {
-      console.warn("关闭语音识别失败", error);
+      ElMessage.warning(error instanceof Error ? error.message : "语音识别失败");
+    } finally {
+      resetState();
+      recorder = undefined;
     }
   }
 
@@ -137,11 +215,11 @@ export default function useVoiceInput(options: {
     if (!instance || options.locked() || !options.active() || instance.chatEditor.isComposition) return;
     if (!voiceSupported) {
       clearVoicePress();
-      ElMessage.warning("当前浏览器或 WebView 不支持原生语音识别，无法使用语音输入，请改用文字输入。");
+      ElMessage.warning("当前环境无法访问麦克风，请改用文字输入。");
       return;
     }
     try {
-      let position = { ...instance.getCurrentNode() };
+      let position = { ...instance.getCurrentNode() } as ReturnType<xSender["getCurrentNode"]>;
       const selection = window.getSelection();
       if (selection?.focusNode && instance.chatElement.richText.contains(selection.focusNode)) {
         for (const line of instance.chatEditor.NODES) for (const tag of line.children) {
@@ -149,70 +227,41 @@ export default function useVoiceInput(options: {
           const range = document.createRange();
           range.selectNodeContents(tag.$el);
           range.setEnd(selection.focusNode, selection.focusOffset);
-          position = { node: selection.focusNode, instance: tag, offset: range.toString().length };
+          position = { node: selection.focusNode, instance: tag, offset: range.toString().length } as ReturnType<xSender["getCurrentNode"]>;
         }
       }
-      const asr = createBrowserAsr({
-        lang: "zh-CN",
-        continuous: true,
-        onStateChange(state) {
-          if (voiceAsr !== asr || state === "destroyed") return;
-          if (state === "idle") void finishVoiceInput(asr, instance, position);
-          else voiceState.value = state;
-        },
-        onResult({ text, finalText }) {
-          if (voiceAsr !== asr) return;
-          voiceText.value = text;
-          voiceFinalText = finalText;
-        },
-        onError({ code, message }) {
-          if (voiceAsr !== asr) return;
-          console.warn("浏览器原生语音识别失败", { code, message, userAgent: navigator.userAgent });
-          const errors: Record<string, string> = {
-            "not-allowed": translate("麦克风权限未获允许，请在浏览器或系统设置中开启"),
-            "service-not-allowed": translate("当前浏览器或 WebView 未允许使用语音识别服务，暂时无法进行语音输入。"),
-            "audio-capture": translate("无法使用麦克风，请检查设备连接和占用情况"),
-            "no-speech": translate("未检测到语音，请长按后说话"),
-            "network": translate("浏览器内置语音服务连接失败（network），请检查网络是否能访问该服务。"),
-            "language-not-supported": translate("当前语音识别服务不支持中文"),
-          };
-          cancelVoiceInput();
-          ElMessage.warning(errors[code] ?? `语音识别失败：${message}`);
-        },
-      });
-      voiceAsr = asr;
+      currentInstance = instance;
+      currentPosition = position;
+      cancelled = false;
+      chunks = [];
       voiceText.value = "";
-      voiceFinalText = "";
-      options.onStart();
-      asr.start();
-      void startVoiceMeter(asr);
+      navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+        mediaStream = stream;
+        let mimeType = "";
+        try {
+          mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus"
+            : MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : "";
+        } catch { /* 用默认 */ }
+        try {
+          recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+        } catch (error) {
+          cancelVoiceInput();
+          ElMessage.warning(error instanceof Error ? `无法启动录音：${error.message}` : "无法启动录音");
+          return;
+        }
+        recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+        recorder.onstop = () => { void finishTranscribe(); };
+        recorder.start();
+        voiceState.value = "recording";
+        options.onStart();
+        void startVoiceMeter(stream);
+      }).catch(error => {
+        cancelVoiceInput();
+        ElMessage.warning(error instanceof Error ? `无法打开麦克风：${error.message}` : "无法打开麦克风，请检查权限");
+      });
     } catch (error) {
       cancelVoiceInput();
-      ElMessage.warning(error instanceof Error ? error.message : "无法启动语音识别");
-    }
-  }
-
-  async function finishVoiceInput(asr: ReturnType<typeof createBrowserAsr>, instance: xSender, position: ReturnType<xSender["getCurrentNode"]>) {
-    const text = voiceFinalText;
-    stopVoiceMeter();
-    clearVoicePress();
-    voiceState.value = "stopping";
-    try {
-      asr.destroy();
-      if (!text || options.getSender() !== instance || !options.active() || options.disabled()) return;
-      instance.enable();
-      if (instance.chatElement.richText.contains(position.instance.$el)) position.instance.focus(Math.min(position.offset, position.instance.$el.textContent?.length ?? 0));
-      else instance.focus("last");
-      await instance.setText(text);
-    } catch (error) {
-      ElMessage.error(error instanceof Error ? error.message : "语音文字回填失败，未能将识别结果填入输入框。");
-    } finally {
-      if (voiceAsr === asr) {
-        voiceAsr = undefined;
-        voiceText.value = "";
-        voiceFinalText = "";
-        voiceState.value = "idle";
-      }
+      ElMessage.warning(error instanceof Error ? error.message : "无法启动语音输入");
     }
   }
 
@@ -235,5 +284,5 @@ export default function useVoiceInput(options: {
     document.removeEventListener("visibilitychange", cancelVoiceInput);
   });
 
-  return { voiceSupported, voiceState, voiceText, voiceActive, voiceButtonLabel, voiceLevel, armVoiceInput, startVoiceInput, stopVoiceInput, clearVoicePress, cancelVoiceInput };
+  return { voiceSupported, voiceState, voiceText, voiceActive, voiceButtonLabel, voiceLevel, voiceBars, armVoiceInput, startVoiceInput, stopVoiceInput, clearVoicePress, cancelVoiceInput };
 }

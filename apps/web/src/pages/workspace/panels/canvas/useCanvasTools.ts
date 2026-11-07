@@ -188,9 +188,16 @@ export function useCanvasTools(options: {
           if (flow.getConnectedEdges(node.id).some(edge => edge.deletable === false)) throw new Error(`节点存在不可删除的连接：${node.id}`);
         });
         for (const node of nodes) {
-          await useNodeEvent(node.id, flow).emit("delete");
+          // [2026-11-04 修] 以前这里抛错只回一句「参数错误」，看不出是哪个节点、哪一步。
+          // 现在把 nodeId、节点名和真实原因一起带出去。
+          try {
+            await useNodeEvent(node.id, flow).emit("delete");
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            throw new Error(`删除节点失败（${node.id}「${node.data?.label ?? node.type}」）：${reason}`);
+          }
           signal.throwIfAborted();
-          if (flow.findNode(node.id) !== node) throw new Error("节点已被替换，请重新查询画布");
+          if (flow.findNode(node.id) !== node) throw new Error(`节点已被替换，请重新查询画布：${node.id}`);
         }
         const edgeIds = flow.getEdges.value.filter(edge => idSet.has(edge.source) || idSet.has(edge.target)).map(edge => edge.id);
         flow.removeNodes(nodeIds, true);

@@ -21,6 +21,9 @@ interface ProviderModel<TRules extends readonly ProviderFormRule[] = readonly Pr
   audio?: "optional" | boolean;
   imageSizes?: string[];
   imageRatios?: string[];
+  /** [2026-11-05] 尺寸 → 真实比例映射，用于尺寸框与比例框联动（如 {"2048x1536":"4:3"}）。
+   *  不填的模型行为不变：比例框独立选择。 */
+  sizeRatios?: Record<string, string>;
   durationResolutionMap?: { duration: number[]; resolution: string[] }[];
   voices?: { title: string; voice: string }[];
   /** 模型专属的 form-create JSON 规则，节点表单值作为 request.other 传入。 */

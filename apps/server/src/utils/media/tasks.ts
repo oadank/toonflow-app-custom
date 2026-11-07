@@ -36,6 +36,10 @@ const recordSchema = z.strictObject({
   mediaType: mediaTypeSchema.optional(),
   request: z.union([imageGenerationSchema, videoGenerationSchema, audioGenerationSchema]).optional(),
   nodeId: z.string().min(1).max(512).optional(), canvasPath: relativePathSchema.optional(),
+  // [2026-11-04 修] 客户端会把「能否续跑」一起写进任务记录；strictObject 里缺这个键，
+  // 导致已存在的记录读不出来 → 删除节点/cancelGeneration 全部抛 ZodError → 被包成「参数错误」。
+  // 声明成可选：老记录（没这个键）照样能读，新记录（带这个键）也能读。
+  resumable: z.boolean().optional(),
   state: z.enum(["running", "interrupted", "succeeded", "failed", "cancelled"]),
   createdAt: z.number().finite().nonnegative(), updatedAt: z.number().finite().nonnegative(),
   checkpoint: checkpointSchema,
@@ -352,8 +356,21 @@ export async function status(cwd: string, taskIds: string[], resume = false) {
       if (!task.active && (task.record.state === "running" || (resume && task.record.state === "interrupted"))) {
         if (await resumable(task)) await launch(task, true);
         else {
-          task.record.state = "interrupted";
-          task.record.result ??= error("上次生成已中断，缺少可恢复的任务凭据，请先确认供应商任务状态", null, 409);
+          // [2026-11-07] 区分两种"断"：
+          // ① 凭据为空 = 这次请求根本没拿到供应商任务号（进程在提交途中被杀）。
+          //    这种情况没有"结果未知"可言，若仍标 interrupted，画布节点会判定
+          //    "仍有未确认任务"而禁止再次生成，只能手动「放弃任务」，等于把节点锁死。
+          //    所以标 failed（事实就是失败），节点即可直接重新生成。
+          // ② 凭据存在但不可恢复 = 供应商那边可能已接单，维持 interrupted 让人先核对。
+          const neverSubmitted = !task.record.checkpoint.providerData
+            && !task.record.checkpoint.assets?.length
+            && !task.record.checkpoint.files?.length;
+          task.record.state = neverSubmitted ? "failed" : "interrupted";
+          if (neverSubmitted) {
+            task.record.result = error("上次生成被服务重启中断，还没提交到供应商，直接重新生成即可", null, 409);
+          } else {
+            task.record.result ??= error("上次生成已中断，缺少可恢复的任务凭据，请先确认供应商任务状态", null, 409);
+          }
           await persist(task);
         }
       }

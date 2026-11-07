@@ -56,7 +56,7 @@ type ReferencedVideoRequest = VideoRequest & {
 function videoPrompt(request: ReferencedVideoRequest, mode: VideoMode) {
   const model = request.model.toLowerCase();
   const isFrames = mode === "startEndRequired" || mode === "endFrameOptional" || mode === "startFrameOptional";
-  return request.prompt.replace(/\{\{ref (\d+)\}\}/g, (marker, number: string) => {
+  return request.prompt.replace(/\{\{\s*(?:ref|Mixed)\s*(\d+)\s*\}\}/gi, (marker, number: string) => {
     const reference = request.referenceOrder?.[Number(number) - 1];
     if (!reference) throw new Error(`引用标记 ${marker} 缺少素材映射，请更新视频节点或提供 referenceOrder`);
     if (reference.type === "text") return `参考 ${Number(number)}`;

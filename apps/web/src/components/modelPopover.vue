@@ -57,7 +57,7 @@ import { IconChevronDown, IconChevronUp } from "@tabler/icons-vue";
 import { modelIcon } from "@toonflow/model-icons";
 import modelLabel from "@toonflow/node-shared/modelLabel";
 import type { ThinkingLevel } from "@toonflow/server/modelReasoning";
-import { customProviders, modelChoices } from "@/stores/settings";
+import { customProviders, modelChoices, defaultModelValue } from "@/stores/settings";
 
 const selectedModel = defineModel<string>({ default: "" });
 const reasoningEffort = defineModel<string>("reasoningEffort", { default: "" });
@@ -71,7 +71,7 @@ const reasoningOptions = computed(() => [{ label: "默认", value: "" }, ...reas
 const reasoningColumns = computed(() => Math.min(4, reasoningOptions.value.length > 4 ? Math.ceil(reasoningOptions.value.length / 2) : reasoningOptions.value.length));
 const reasoningLabel = computed(() => reasoningOptions.value.find(item => item.value === reasoningEffort.value)?.label ?? "默认");
 watch(modelChoices, items => {
-  if (!selectedModel.value) selectedModel.value = items[0]?.value ?? "";
+  if (!selectedModel.value) selectedModel.value = (defaultModelValue.value || items[0]?.value) ?? "";
 }, { immediate: true });
 watch([() => selectedModelChoice.value?.reasoningLevels, reasoningEffort], ([levels, effort]) => {
   if (levels && effort && !levels.includes(effort as ThinkingLevel)) reasoningEffort.value = "";

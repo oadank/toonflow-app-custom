@@ -5,6 +5,7 @@
     :topVisible="node.selected"
     topWidth="max-content"
     :downloadUrl="previewUrl"
+    :viewImage="imagePreviewUrl"
     :downloadName="outputFile?.url.split(/[\\/]/).at(-1)"
     @fullscreen="previewVisible = true"
     :bottomWidth="660"
@@ -87,6 +88,7 @@
             :model="selectedModel"
             :sizes="sizeOptions"
             :ratios="ratioOptions"
+            :size-ratios="selectedModel?.sizeRatios"
             :disabled="generating || deleting || !selectedModel" />
           <el-button v-if="editor?.mode === 'inpaint'" class="confirmButton" type="primary" :icon="IconCheck" :loading="editor.busy" :disabled="deleting || uploading || !generationPrompt" @click="confirmInpaint().catch(error => showNodeError(error, '重绘节点创建失败'))">确认</el-button>
           <div v-else class="generationActions">
@@ -206,10 +208,13 @@ watch(
   (choice) => {
     if (!choice) return;
     // ACT: 现有分辨率使用 K 单位；出现其他单位时再统一换算，未知名称排在数值选项之后。
-    if (!sizeOptions.value.includes(data.value.size)) data.value.size = sizeOptions.value.toSorted((left, right) =>
-      (Number.parseFloat(left) || Infinity) - (Number.parseFloat(right) || Infinity)
-    )[0]!;
+    // [2026-11-05] 改成「按数组顺序取第一个」：数组首项就是平台推荐的默认档，
+    // 比按数字猜更可控（例如 qwen 编辑把 2K 写在最前面做默认，按数字排会掉到 1K）。
+    if (!sizeOptions.value.includes(data.value.size)) data.value.size = sizeOptions.value[0]!;
     if (!ratioOptions.value.includes(data.value.ratio)) data.value.ratio = ratioOptions.value.includes("16:9") ? "16:9" : ratioOptions.value[0]!;
+    // [2026-11-05] 配了 sizeRatios 的模型：切换模型后，比例必须与该尺寸的真实比例一致
+    const mappedRatio = choice.sizeRatios?.[data.value.size];
+    if (mappedRatio) data.value.ratio = mappedRatio;
   },
   { flush: "sync" }
 );
@@ -483,6 +488,9 @@ nodeTools.register({
     data.value.model = JSON.stringify([choice.providerId, choice.modelId]);
     if (args.size !== undefined) data.value.size = args.size;
     if (args.ratio !== undefined) data.value.ratio = args.ratio;
+    // [2026-11-05] 配了 sizeRatios 的模型：尺寸是主控，比例必须跟着尺寸走，避免 AI 设出「2048x1536 + 3:2」这种不存在的组合
+    const mappedRatio = choice.sizeRatios?.[data.value.size];
+    if (mappedRatio) data.value.ratio = mappedRatio;
     return getConfig();
   },
 });

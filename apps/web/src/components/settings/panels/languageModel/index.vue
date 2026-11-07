@@ -1,5 +1,6 @@
 <template>
   <div class="providerList">
+    <CodeBuddyCredits />
     <div class="itemList">
       <el-card v-for="item in visibleProviders" :key="item.id" class="providerItem" shadow="never">
         <div class="providerHeader">
@@ -42,6 +43,7 @@ import { ElMessage } from "element-plus";
 import { customProviders, saveSettings, type CustomProvider } from "@/stores/settings";
 import { IconPlus, IconSettings, IconEdit, IconTrash } from "@tabler/icons-vue";
 import { languageProviders } from "@toonflow/providers";
+import CodeBuddyCredits from "./codebuddyCredits.vue";
 
 defineProps<{ visible?: boolean }>();
 const addProviderDialog = shallowRef<Component>();

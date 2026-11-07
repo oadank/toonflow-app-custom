@@ -171,7 +171,19 @@ const selectedIds = ref(new Set<string>());
 const modelSearch = ref("");
 const saving = ref(false);
 const thinkingLevelLabels: Record<ThinkingLevel, string> = { off: "关闭", minimal: "最小", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最高" };
-const protocols = ["openai-completions", "openai-responses", "anthropic-messages"];
+const protocols = ["openai-completions", "openai-responses", "anthropic-messages", "codebuddy-cli"];
+const codebuddyPresetModels = [
+  { id: "deepseek-v4.1-flash", label: "Dsv4.1f" },
+  { id: "hy3", label: "Hy3" },
+  { id: "glm-5.3-flash", label: "Glm5.3f" },
+  { id: "step-5-preview", label: "Step5" },
+];
+// codebuddy-cli 不走 HTTP：API 地址只是给现有表单校验用的占位值，模型由本机 CLI 提供。
+watch(() => form.protocol, (value) => {
+  if (value !== "codebuddy-cli") return;
+  if (!form.apiUrl.trim()) form.apiUrl = "http://127.0.0.1/";
+  if (!models.value.length) models.value = codebuddyPresetModels.map((item) => ({ ...item, key: crypto.randomUUID() }));
+});
 const addedIds = computed(() => new Set(models.value.map((item) => item.id.trim())));
 const filteredModels = computed(() => {
   const query = modelSearch.value.trim().toLowerCase();

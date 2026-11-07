@@ -1,7 +1,7 @@
 <template>
   <div v-if="documentTarget" class="nodeDocumentPlaceholder" :style="canvasSize" aria-hidden="true" />
   <teleport :to="documentTarget ?? 'body'" :disabled="!documentTarget">
-  <div ref="skeletonElement" v-bind="$attrs" class="nodeSkeleton" :class="{ documentNode: documentTarget, resized: !!resizedStyle.height, resizing: !!resize }" :style="resizedStyle" @wheel.capture="zoomCanvas" @dblclick.stop="focusNode" @contextmenu="documentTarget && openMenu($event)">
+  <div ref="skeletonElement" v-bind="$attrs" class="nodeSkeleton" :class="{ documentNode: documentTarget, resized: !!resizedStyle.height, resizing: !!resize }" :style="resizedStyle" @wheel.capture="zoomCanvas" @dblclick.stop="focusNode" @mousedown="onMiddlePrevent" @auxclick="onAuxClick" @contextmenu="documentTarget && openMenu($event)">
     <el-dropdown
       v-if="!readOnly"
       ref="menu"
@@ -15,7 +15,12 @@
       @command="handleCommand">
       <template #dropdown>
         <el-dropdown-menu>
-          <el-dropdown-item v-if="assetOutputs.length && saveNodeToAssets" command="saveAsset" :icon="IconFolderPlus">保存到素材库</el-dropdown-item>
+          <!-- [2026-11-05 老大令] 「查看大图」追加到原有右键菜单里，不另弹菜单，避免和保存到素材库那套打架。
+               只有传了 viewImage 的节点（图片类）才显示这一项。 -->
+          <el-dropdown-item v-if="viewImage" command="viewImage" :icon="IconMaximize">查看大图</el-dropdown-item>
+          <el-dropdown-item v-else-if="viewVideo" command="viewVideo" :icon="IconMaximize">播放视频</el-dropdown-item>
+          <el-dropdown-item v-else-if="previewLabel" command="preview" :icon="IconMaximize">{{ previewLabel }}</el-dropdown-item>
+          <el-dropdown-item v-if="assetOutputs.length && saveNodeToAssets" :divided="!!(viewImage || viewVideo || previewLabel)" command="saveAsset" :icon="IconFolderPlus">保存到素材库</el-dropdown-item>
           <el-dropdown-item :divided="!!(assetOutputs.length && saveNodeToAssets)" command="copy" :icon="IconCopy">复制节点</el-dropdown-item>
           <el-dropdown-item command="duplicate" :icon="IconCopyPlus">创建副本</el-dropdown-item>
           <el-dropdown-item command="delete" :icon="IconTrash">删除节点</el-dropdown-item>
@@ -25,6 +30,8 @@
         </el-dropdown-menu>
       </template>
     </el-dropdown>
+    <imageLightbox v-if="viewImage" v-model:visible="imageViewerVisible" :src="viewImage" kind="image" />
+    <imageLightbox v-if="viewVideo" :visible="!!videoViewerSrc" :src="videoViewerSrc" kind="video" @update:visible="(v: boolean) => { if (!v) videoViewerSrc = ''; }" />
     <div
       v-if="!readOnly && (documentTarget || (topVisible && slotsVisible))"
       class="floatingSlot topSlot nodrag nopan nowheel"
@@ -193,6 +200,7 @@ import {
 } from "@tabler/icons-vue";
 import { ElCard, ElButton, ElDivider, ElDropdown, ElDropdownMenu, ElDropdownItem, ElMessage } from "element-plus";
 import type { DropdownInstance } from "element-plus";
+import imageLightbox from "./imageLightbox.vue";
 import { validateConnection } from "./connection";
 import { useNodeEvent } from "./nodeEvent";
 import type { NodeConnectionFeedback, NodeData, NodeHandle } from "./connection";
@@ -203,8 +211,41 @@ defineOptions({ inheritAttrs: false });
 
 const topVisible = defineModel<boolean>("topVisible", { default: false });
 const bottomVisible = defineModel<boolean>("bottomVisible", { default: false });
-const emit = defineEmits<{ fullscreen: [] }>();
+const emit = defineEmits<{ fullscreen: []; preview: [] }>();
 const downloading = ref(false);
+// [2026-11-05] 右键「查看大图」：自写灯箱（支持 1:1 / 中键 / 点图外关闭）
+const imageViewerVisible = ref(false);
+// [2026-11-05] 视频悬浮窗
+const videoViewerSrc = ref("");
+
+/** [2026-11-05] 中键按下先掐掉浏览器默认的「自动滚动」——不掐的话 Windows 会进入滚轮滚动模式，
+ *  auxclick 根本不触发（老大实测：光标变成上下箭头，弹窗不出来）。 */
+function onMiddlePrevent(event: MouseEvent) {
+  if (event.button !== 1) return;
+  if (!props.viewImage && !props.viewVideo && !props.previewLabel) return;
+  event.preventDefault();
+}
+
+/** [2026-11-05 老大令] 中键点节点内容 = 打开预览/编辑。
+ *  图片走内置灯箱；视频走悬浮窗播放；文本等节点传 previewLabel 后由节点自己处理（emit('preview')）。
+ *  用 auxclick（中键/右键专用事件）而不是 mousedown：前者只在按键松手那一刻触发一次，不会和拖拽抢。 */
+function onAuxClick(event: MouseEvent) {
+  if (event.button !== 1) return;
+  if (props.viewImage) {
+    event.preventDefault();
+    imageViewerVisible.value = true;
+    return;
+  }
+  if (props.viewVideo) {
+    event.preventDefault();
+    videoViewerSrc.value = props.viewVideo;
+    return;
+  }
+  if (props.previewLabel) {
+    event.preventDefault();
+    emit("preview");
+  }
+}
 const props = withDefaults(
   defineProps<
     NodeData & {
@@ -216,6 +257,12 @@ const props = withDefaults(
       bottomWidth?: string | number;
       downloadUrl?: string;
       downloadName?: string;
+      /** [2026-11-05] 传了就在右键菜单里出现「查看大图」，点开用 el-image-viewer 全屏看（可缩放/拖动） */
+      viewImage?: string;
+      /** [2026-11-05] 非图片节点的预览入口文案（如「全屏播放」「编辑文本」）；点了 emit('preview') 交给节点自己处理 */
+      previewLabel?: string;
+      /** [2026-11-05] 传了就在右键菜单出现「播放视频」，中键点内容也直接开悬浮窗播放（不是浏览器全屏） */
+      viewVideo?: string;
       fullscreenVisible?: boolean;
     }
   >(),
@@ -516,6 +563,20 @@ const assetOutputs = computed(() =>
 
 async function handleCommand(command: string) {
   if (props.readOnly) return;
+  // [2026-11-05] 「查看大图」打开自写灯箱（不是 el-image-viewer —— 那套没有 1:1、点图外不关、中键绑不上）
+  if (command === "viewImage" && props.viewImage) {
+    imageViewerVisible.value = true;
+    return;
+  }
+  if (command === "viewVideo" && props.viewVideo) {
+    videoViewerSrc.value = props.viewVideo;
+    return;
+  }
+  // 非图片节点（视频/文本等）：菜单项与中键都走节点自己的预览动作
+  if (command === "preview" && props.previewLabel) {
+    emit("preview");
+    return;
+  }
   if (command === "saveAsset") saveNodeToAssets?.(props.label, assetOutputs.value);
   if (command === "clipboard" && copyNodeToClipboard && !copyingToClipboard.value) {
     copyingToClipboard.value = true;

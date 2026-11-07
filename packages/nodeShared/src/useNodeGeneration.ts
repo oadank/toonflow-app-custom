@@ -172,9 +172,26 @@ export function useNodeGeneration(outputs: Readonly<Ref<NodeOutputs>>, cancel: (
 
   function resume() {
     if (recovering) return recovering;
+    // 🔴 [2026-11-02] 复制节点会把源节点的 mediaTask 一起复制过来，nodeId 对不上。
+    // 这不是"归属无效"的故障，只是复制时带过来的旧记录——直接丢掉，复制出来的节点就是干净的新节点。
+    const orphan = savedData.value.mediaTask;
+    if (orphan && orphan.nodeId !== id) {
+      delete savedData.value.mediaTask;
+      void getPersistence?.()?.save?.();
+      return Promise.resolve();
+    }
     const task = savedData.value.mediaTask;
     const context = getPersistence?.();
     if (!options || !task || !context || !needsRecovery()) return Promise.resolve();
+    // 🔴 [2026-11-02] 服务端已明确返回 5xx（任务确实失败）：直接判失败释放任务，
+    // 否则每次刷新都会重放同一条历史错误、没完没了地弹"恢复失败"。
+    const savedResult = (task as { result?: { code?: number; message?: string } }).result;
+    if (Number(savedResult?.code || 0) >= 500) {
+      task.state = "failed";
+      task.resumable = false;
+      void context.save?.();
+      return Promise.resolve();
+    }
     if (task.nodeId !== id || task.directory !== context.directory || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(task.taskId)
       || !["image", "video", "audio"].includes(task.mediaType)) return Promise.reject(new Error("保存的生成任务归属无效，请放弃此任务后重新生成"));
     recoveryController = new AbortController();
@@ -209,7 +226,11 @@ export function useNodeGeneration(outputs: Readonly<Ref<NodeOutputs>>, cancel: (
       if (options && task && needsRecovery()) {
         if (!context) throw new Error("工作区已变化，无法取消此节点任务");
         // ACT: 项目移动后的旧任务仅在当前节点放弃，不请求原目录的后台任务。
-        if (task.directory === context.directory) await options.ai.cancelMedia(task.directory, task.taskId);
+        // [2026-11-04 修] 任务已被判定「不可续跑」（interrupted + resumable === false）时，
+        // 后台已经没有可取消的东西：再发一次取消请求只会被服务端拒掉，连带把「删除节点」整条链路拖死。
+        // 直接本地作废任务记录，跳过这次网络请求。
+        const alreadyDead = task.state === "interrupted" && task.resumable === false;
+        if (!alreadyDead && task.directory === context.directory) await options.ai.cancelMedia(task.directory, task.taskId);
         const current = getPersistence?.();
         if (savedData.value.mediaTask?.taskId === task.taskId && current?.directory === context.directory && findNode(id) === node) {
           const { state, resumable } = task;
@@ -229,6 +250,13 @@ export function useNodeGeneration(outputs: Readonly<Ref<NodeOutputs>>, cancel: (
   }
 
   watch(() => getPersistence?.()?.canvasPath, path => {
+    // 🔴 [2026-11-02] 同上：复制节点带过来的孤儿任务先丢掉，别让它触发"归属无效"弹窗
+    const orphan = savedData.value.mediaTask;
+    if (orphan && orphan.nodeId !== id) {
+      delete savedData.value.mediaTask;
+      void getPersistence?.()?.save?.();
+      return;
+    }
     const task = savedData.value.mediaTask;
     if (!path || !options || !task || generating.value || !needsRecovery() || attemptedTaskId === task.taskId) return;
     attemptedTaskId = task.taskId;

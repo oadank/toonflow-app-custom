@@ -21,7 +21,7 @@
           :disabled="disabled"
           :aria-label="`比例 ${item}`"
           :aria-pressed="ratio === item"
-          @click="ratio = item">
+          @click="pickRatio(item)">
           <span class="ratioContent">
             <span class="ratioShape" :style="ratioStyle(item)" aria-hidden="true" />
             <span>{{ item }}</span>
@@ -34,17 +34,39 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import { ElButton, ElPopover, ElRadioGroup, ElRadioButton } from "element-plus";
 import { IconChevronDown, IconChevronUp } from "@tabler/icons-vue";
 import type { NodeMediaModel } from "@toonflow/nodes-scaffold/runtime";
 import modelForm from "@toonflow/node-shared/modelForm";
 
-defineProps<{ sizes: string[]; ratios: string[]; model?: NodeMediaModel; disabled?: boolean }>();
+const props = defineProps<{ sizes: string[]; ratios: string[]; sizeRatios?: Record<string, string>; model?: NodeMediaModel; disabled?: boolean }>();
 const settingsVisible = ref(false);
 const size = defineModel<string>("size", { required: true });
 const ratio = defineModel<string>("ratio", { required: true });
 const other = defineModel<Record<string, unknown>>("other", { required: true });
+
+/** 尺寸 → 真实比例。模型没配 sizeRatios 时恒为 undefined，行为与改造前完全一致。 */
+function ratioOfSize(value: string | undefined): string | undefined {
+  return value ? props.sizeRatios?.[value] : undefined;
+}
+
+// 尺寸框是主控：选尺寸 → 比例框自动跳到该尺寸的真实比例
+watch(
+  size,
+  (value) => {
+    const target = ratioOfSize(value);
+    if (target && target !== ratio.value) ratio.value = target;
+  },
+  { flush: "sync" },
+);
+
+// 比例框反向联动：点比例 → 切到该比例对应的唯一尺寸
+function pickRatio(item: string) {
+  ratio.value = item;
+  const match = props.sizes.find((s) => ratioOfSize(s) === item);
+  if (match && match !== size.value) size.value = match;
+}
 
 function ratioStyle(value: string) {
   const [width = 1, height = 1] = value.split(":").map(Number);

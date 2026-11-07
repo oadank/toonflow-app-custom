@@ -31,6 +31,14 @@ export const agentUserMessageSchema = z.object({
   delivery: z.object({ mode: z.enum(["steer", "followUp"]), taskMessageId: z.string().min(1) }).optional(),
 });
 
+/** 每轮结束后写进会话文件的余额/消耗快照，保证刷新后消息下方的 pill 还在。 */
+export const agentCreditsSchema = z.object({
+  messageId: z.string().min(1),
+  balance: z.number().nullable(),
+  runCost: z.number().nullable(),
+  unit: z.enum(["cny", "credit"]).optional(),
+});
+
 export function getAgentUserMessage(history: SessionManager, messageId: string) {
   const entry = history.getBranch().findLast(entry => entry.type === "custom"
     && ["toonflowAttachments", "toonflowUserMessage"].includes(entry.customType)
@@ -67,6 +75,8 @@ type SessionMessage = {
   agentMessage?: Omit<AgentPeerMessage, "id" | "content">;
   mentions?: AgentMention[];
   delivery?: AgentMessageDelivery;
+  /** 每轮余额/消耗，来自 custom toonflowCredits，刷新后仍能显示。 */
+  credits?: { balance: number | null; runCost: number | null; unit?: "cny" | "credit" };
   parts: ({ id: string; type: "text" | "thinking"; content: string; collapsed?: boolean } | { id: string; type: "tool"; tool: AgentToolCall })[];
 };
 // ACT: 复用正在运行的 SDK 会话，文件锁仍由 run 持有；多进程部署时需共享会话所有权。
@@ -414,8 +424,26 @@ export async function createAgentConversation(cwd: string, child?: Omit<AgentSub
   return getAgentSession(cwd, path);
 }
 
-export async function renameAgentSession(cwd: string, path: string, name: string) {
+/** 把本轮余额/消耗写进会话文件（custom toonflowCredits），刷新后消息下方 pill 仍在。 */
+export async function appendAgentCredits(cwd: string, path: string, data: z.infer<typeof agentCreditsSchema>) {
   const release = lockWorkspaceFiles([path]);
+  try {
+    const entries = parseSessionEntries(await readFile(path, "utf8"));
+    if (entries[0]?.type !== "session") throw Object.assign(new Error("会话文件无效"), { status: 400 });
+    const history = SessionManager.open(path, dirname(path), cwd);
+    history.appendCustomEntry("toonflowCredits", {
+      messageId: data.messageId,
+      balance: data.balance,
+      runCost: data.runCost,
+      unit: data.unit ?? "credit",
+    });
+    return { ok: true };
+  } finally {
+    release();
+  }
+}
+
+export async function renameAgentSession(cwd: string, path: string, name: string) {  const release = lockWorkspaceFiles([path]);
   try {
     const entries = parseSessionEntries(await readFile(path, "utf8"));
     if (entries[0]?.type !== "session") throw Object.assign(new Error("会话文件无效"), { status: 400 });
@@ -475,6 +503,16 @@ export async function getAgentSession(cwd: string, path: string) {
     branch.flatMap((entry) =>
       entry.type === "message" && entry.message.role === "toolResult" ? [[entry.message.toolCallId, entry.message] as const] : []
     )
+  );
+  // 每轮余额/消耗单独存 custom 条目，刷新/重开对话后仍能挂在对应消息上。
+  const creditsByMessage = new Map(
+    branch.flatMap((entry) => {
+      if (entry.type !== "custom" || entry.customType !== "toonflowCredits") return [];
+      const parsed = agentCreditsSchema.safeParse(entry.data);
+      return parsed.success
+        ? [[parsed.data.messageId, { balance: parsed.data.balance, runCost: parsed.data.runCost, unit: parsed.data.unit ?? "credit" }] as const]
+        : [];
+    })
   );
   let replyTo: string | undefined;
   let delivery: AgentMessageDelivery | undefined;
@@ -564,6 +602,7 @@ export async function getAgentSession(cwd: string, path: string) {
         queueId: attachmentMessage?.queueId,
         delivery,
         report: undefined,
+        credits: message.role === "assistant" ? creditsByMessage.get(entry.id) : undefined,
       },
     ];
   });
@@ -660,9 +699,27 @@ export function getAgentStats(history: SessionManager, timing?: { outputTokens: 
 }
 
 export function getAgentContext(history: SessionManager, contextWindow = 0) {
-  if (contextWindow <= 0) return undefined;
   const branch = history.getBranch();
   const compactionIndex = branch.findLastIndex((entry) => entry.type === "compaction");
+  // 🔴 codebuddy 外挂进程会把 CLI 亲口报的「当前上下文占用」（_meta["codebuddy.ai/contextUsed"]）写成 custom 条目，
+  //    这是绝对值、不是估算。重开会话时必须优先用它——否则只能拿最后一条 assistant 的增量 usage 当上下文，会明显偏小。
+  //    只认压缩点之后的：压缩前的值对应旧窗口，已经作废。
+  const recorded = (() => {
+    let tokens = 0;
+    let win = 0;
+    for (const entry of branch.slice(compactionIndex + 1)) {
+      if (entry.type !== "custom" || entry.customType !== "toonflowContextUsed") continue;
+      const data = entry.data as { tokens?: number; contextWindow?: number } | undefined;
+      tokens = Number(data?.tokens ?? 0);
+      win = Number(data?.contextWindow ?? 0);
+    }
+    return { tokens, win };
+  })();
+  {
+    const win = recorded.win > 0 ? recorded.win : contextWindow;
+    if (recorded.tokens > 0 && win > 0) return { tokens: recorded.tokens, contextWindow: win, percent: (recorded.tokens / win) * 100 };
+  }
+  if (contextWindow <= 0) return undefined;
   const recent = branch.slice(compactionIndex + 1);
   const usage = getLastAssistantUsage(recent);
   const messages = history.buildSessionContext().messages;

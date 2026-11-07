@@ -22,6 +22,8 @@ export type AgentMessage = {
   error?: string;
   report?: { file: string; name: string };
   agentMessage?: { fromFile: string; fromName: string; toFile: string; toName: string; startsTurn?: boolean };
+  /** 每轮结束挂在 assistant 消息上的余额/消耗（消息下方 pill 用）。unit 区分计费体系：cny=DeepSeek 官方¥，credit=CodeBuddy 积分。 */
+  credits?: { balance: number | null; runCost: number | null; unit?: "cny" | "credit" };
 };
 
 export type AgentHistory = { file: string; name: string; modified: string; messageCount: number };

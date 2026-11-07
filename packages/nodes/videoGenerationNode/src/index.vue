@@ -6,6 +6,7 @@
     topWidth="max-content"
     :downloadUrl="previewUrl"
     :downloadName="outputFile?.url.split(/[\\/]/).at(-1)"
+    :viewVideo="previewUrl"
     @fullscreen="player?.enterFullscreen()"
     :bottomWidth="660"
     :style="{ width: previewUrl && videoWidth ? `${videoWidth + 18}px` : undefined }">
@@ -367,7 +368,8 @@ async function startGeneration() {
   if (!choice || !input) throw new Error("请先选择视频模型");
   if (!input.prompt) throw new Error("请输入生成提示词");
   if (refList.value.some(item => item.value === undefined)) throw new Error("引用节点暂无内容，请先补充引用内容");
-  for (const match of input.prompt.matchAll(/\{\{ref (\d+)\}\}/g)) {
+  // [2026-11-07] 槽位兼容：作者版 {{Mixed N}} 与内置 {{ref N}} 同号同义。
+  for (const match of input.prompt.matchAll(/\{\{\s*(?:ref|Mixed)\s*(\d+)\s*\}\}/gi)) {
     const reference = refList.value[Number(match[1]) - 1];
     if (reference?.dataType === "STRING" && !reference.value?.trim()) throw new Error(`参考 ${match[1]} 的文本为空，请补充内容或移除提示词中的引用`);
   }

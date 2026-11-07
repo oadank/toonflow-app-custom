@@ -1,7 +1,8 @@
 <template>
   <div class="home" :class="{ sidebarCollapsed }" :inert="creating || opening || workspaceStore.projectLoadingVisible">
     <bg class="pageBackground" :scrollTop="backgroundScrollTop" />
-    <homeAdvertisementCarousel class="topPromotion" :advertisements="advertisements.banners" placement="banner" :mode="advertisements.bannerMode" :interval="advertisements.bannerInterval" @activate="activateAdvertisement" />
+    <!-- [2026-11-05 老大令] 官方活动广告默认关闭（组件保留不删）；要看在地址后加 ?ads=1 -->
+    <homeAdvertisementCarousel v-if="adVisible" class="topPromotion" :advertisements="advertisements.banners" placement="banner" :mode="advertisements.bannerMode" :interval="advertisements.bannerInterval" @activate="activateAdvertisement" />
     <aside id="homeSidebar" class="homeSidebar" aria-label="首页侧栏">
       <div class="sidebarHeader">
         <div class="sidebarBrand">
@@ -25,7 +26,7 @@
         </button>
       </nav>
       <div class="sidebarFooter">
-        <homeAdvertisementCarousel class="sidebarPromotion" :advertisements="advertisements.sidebar" @activate="activateAdvertisement" />
+        <homeAdvertisementCarousel v-if="adVisible" class="sidebarPromotion" :advertisements="advertisements.sidebar" @activate="activateAdvertisement" />
         <button class="sidebarItem deviceButton" :class="{ connected: deviceHubEnabled || mobileConnection.online === true }" type="button" :aria-label="mobileConnectionLabel" :title="mobileConnectionLabel" @click="mobileConnectVisible = true">
           <span class="sidebarIcon">
             <component :is="deviceHubEnabled || mobileConnection.mode === 'remote' ? IconDeviceDesktop : IconQrcode" :size="18" aria-hidden="true" />
@@ -155,6 +156,8 @@ import homeAdvertisementCarousel from "./homeAdvertisementCarousel.vue";
 const settingsVisible = ref(false);
 const settingsDialog = ref<InstanceType<typeof settings>>();
 const advertisements = ref<HomeAdvertisements>({ banner: null, banners: [], bannerMode: "carousel", bannerInterval: 5, sidebar: [] });
+// [2026-11-05 老大令] 官方活动广告默认关闭；地址加 ?ads=1 可临时查看
+const adVisible = ref(typeof location !== "undefined" && new URLSearchParams(location.search).get("ads") === "1");
 const assetsVisible = ref(false);
 const mobileConnectVisible = ref(false);
 const sidebarCollapsed = ref(false);

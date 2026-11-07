@@ -6,6 +6,7 @@
     :bottomWidth="660"
     topWidth="max-content"
     :downloadUrl="previewUrl"
+    :viewImage="imagePreviewUrl"
     :downloadName="outputFile?.url.split(/[\\/]/).at(-1)"
     @fullscreen="previewVisible = true"
     :style="{ width: previewUrl && imageWidth ? `${imageWidth + 18}px` : undefined }">

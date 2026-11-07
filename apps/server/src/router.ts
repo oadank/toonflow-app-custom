@@ -185,6 +185,10 @@ import route182 from "./routes/workspaces/files/reveal";
 import route183 from "./routes/workspaces/files/write";
 import route184 from "./routes/workspaces/list";
 import route185 from "./routes/workspaces/selectDirectory";
+import route186 from "./routes/codebuddy/credits";
+import route187 from "./routes/deepseek/balance";
+import route188 from "./routes/asr/transcribe";
+import route189 from "./routes/agent/credits";
 
 export default (app: Express) => {
   app.use("/api/agent", route1);
@@ -200,6 +204,7 @@ export default (app: Express) => {
   app.use("/api/agent/queue/steer", route11);
   app.use("/api/agent/rename", route12);
   app.use("/api/agent/skills", route13);
+  app.use("/api/agent/credits", route189);
   app.use("/api/agent/stop", route14);
   app.use("/api/agents/a2a/get", route15);
   app.use("/api/agents/a2a/save", route16);
@@ -372,4 +377,7 @@ export default (app: Express) => {
   app.use("/api/workspaces/files/write", route183);
   app.use("/api/workspaces/list", route184);
   app.use("/api/workspaces/selectDirectory", route185);
+  app.use("/api/codebuddy/credits", route186);
+  app.use("/api/deepseek/balance", route187);
+  app.use("/api/asr/transcribe", route188);
 }

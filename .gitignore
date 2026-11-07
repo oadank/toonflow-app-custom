@@ -31,3 +31,10 @@ Thumbs.db
 *.keychain
 *.keychain-db
 .tmp/
+
+# ---- 本机补充（LeCoo）----
+# 自带运行时（bun.exe 等，85MB），不入仓库
+/bin/
+# 改文件前的临时备份
+*.bak
+*.bak-*

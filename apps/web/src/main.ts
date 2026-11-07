@@ -20,6 +20,29 @@ import { registerDesktopAutoUpdate } from "@/stores/desktopUpdate";
 import { registerLanguage } from "@/lib/i18n";
 import { locale, translate } from "@toonflow/i18n/vue";
 
+// [2026-11-05 老大令] 全屏看图（el-image-viewer）两处补丁，官方默认行为不够用：
+// 1) 官方「点遮罩关闭」绑在 mask 上且带 self，但 canvas 是 100% 全屏盖在 mask 上面，
+//    点图外空白根本到不了 mask → 补一层事件委托：点在图上不关、拖过 6px 不关、其余一律关。
+// 2) 中键点一下 = 缩小一格（转发一个向下滚轮给 canvas，复用官方缩放逻辑，最小后自动退出）。
+document.addEventListener("pointerdown", (event) => {
+  const target = event.target as HTMLElement | null;
+  const canvas = target?.closest?.(".el-image-viewer__canvas");
+  if (!canvas) return;
+  if (event.button === 1) {
+    event.preventDefault();
+    canvas.dispatchEvent(new WheelEvent("wheel", { deltaY: 120, bubbles: true, cancelable: true, clientX: event.clientX, clientY: event.clientY }));
+    return;
+  }
+  if (event.button !== 0 || target?.tagName === "IMG") return;
+  const start = { x: event.clientX, y: event.clientY };
+  const onUp = (end: PointerEvent) => {
+    document.removeEventListener("pointerup", onUp, true);
+    if (Math.hypot(end.clientX - start.x, end.clientY - start.y) > 6) return;
+    (document.querySelector(".el-image-viewer__close") as HTMLElement | null)?.click();
+  };
+  document.addEventListener("pointerup", onUp, true);
+}, true);
+
 const app = createApp(App);
 app.onUnmount(registerLanguage());
 const requiresWebView2Update = actualPlatform.isDesktop && actualPlatform.isWindows

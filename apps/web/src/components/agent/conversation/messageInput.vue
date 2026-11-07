@@ -25,12 +25,12 @@
       @keydown.up.prevent="setSenderHeight((sender?.chatElement.rollBox.clientHeight ?? 44) + 16)"
       @keydown.down.prevent="setSenderHeight((sender?.chatElement.rollBox.clientHeight ?? 44) - 16)" />
     <attachmentList v-if="draftAttachments.length" class="draftAttachments" :attachments="draftAttachments" :directory="directory" removable restorable :disabled="locked" @remove="draftAttachments.splice($event, 1)" @restore="restoreTextAttachment" />
-    <div class="senderInput" @pointerdown.capture="armVoiceInput" @contextmenu="voiceActive && $event.preventDefault()" @dragstart="voiceActive && $event.preventDefault()">
+    <div class="senderInput" @contextmenu="voiceActive && $event.preventDefault()" @dragstart="voiceActive && $event.preventDefault()">
       <div ref="senderElement" class="senderEditor" @keydown.capture="handleSenderKeydown"></div>
       <div v-if="voiceActive" class="voiceOverlay" role="status" aria-live="polite">
         <div class="voiceFeedback">
           <span class="voiceWave" aria-hidden="true"><span v-for="(level, index) in voiceBars" :key="index" :style="{ height: `${3 + level * 21}px` }" /></span>
-          <span>{{ voiceState === 'starting' ? '正在启动语音识别…' : voiceState === 'listening' ? '开始说话，松开结束' : '正在识别…' }}</span>
+          <span>{{ voiceState === 'recording' ? '正在聆听，点击结束（闪电语音）' : voiceState === 'transcribing' ? '闪电识别中…' : '正在识别…' }}</span>
         </div>
         <div v-if="voiceText" class="voiceTranscript">{{ voiceText }}</div>
       </div>
@@ -39,11 +39,19 @@
     <mentionContent ref="draftMentionPreview" :mentions="draftMentions" :directory="directory" removable @remove="removeDraftMention" />
     <div class="senderActions">
       <modelPopover v-model="selectedModel" v-model:reasoningEffort="reasoningEffort" :active="active" :disabled="disabled || running || submitting || voiceActive" />
+      <div v-if="isDeepSeek" class="balancePill" :title="`DeepSeek 官方账号余额 ¥${deepseekBalanceText}（本轮消耗显示在消息下方）`">
+        <span class="dot" aria-hidden="true" />
+        <span class="value">¥{{ deepseekBalanceText }}</span>
+      </div>
+      <div v-else-if="isCodebuddy" class="balancePill" :title="`CodeBuddy 账号余额 ${codebuddyBalanceText} 积分（本轮消耗显示在消息下方）`">
+        <span class="dot" aria-hidden="true" />
+        <span class="value">{{ codebuddyBalanceText }}</span>
+      </div>
       <input ref="attachmentInput" type="file" :accept="attachmentAccept" multiple hidden :disabled="locked || running" @change="selectAttachments" />
       <el-button text circle :disabled="locked || running" aria-label="添加附件" :title="running ? '生成期间仅支持发送文字' : '添加附件'" @click="attachmentInput?.click()"><icon-paperclip :size="16" /></el-button>
       <mentionMenu ref="mentionMenuRef" :directory="directory" :active="active" :disabled="locked || running || !directory" :query="mentionQuery" :editor="senderElement" :currentCanvasId="createCanvasContext?.()?.id" @open="captureMentionPosition" @select="insertMentions" @dismiss="mentionQuery = undefined" />
       <skillMenu ref="skillMenuRef" :directory="directory" :active="active" :disabled="locked || running || !directory" :query="skillQuery" :editor="senderElement" @select="selectSkill" @dismiss="skillQuery = undefined" />
-      <el-button class="voiceButton" :class="{ voiceActive }" text circle :disabled="!voiceSupported || (!voiceActive && locked)" :aria-label="voiceButtonLabel" :aria-pressed="voiceActive" :title="voiceButtonLabel" @click="voiceActive ? cancelVoiceInput() : startVoiceInput()"><icon-microphone :size="18" /></el-button>
+      <el-button class="voiceButton" :class="{ voiceActive }" text circle :disabled="!voiceSupported || (!voiceActive && locked) || voiceState === 'transcribing'" :aria-label="voiceButtonLabel" :aria-pressed="voiceActive" :title="voiceButtonLabel" @click="voiceActive ? stopVoiceInput() : startVoiceInput()"><icon-microphone :size="18" /></el-button>
       <contextUsagePopover v-model:visible="contextMenuVisible" :usage="contextUsage" :stats="stats" :contextWindow="contextWindow" :disabled="voiceActive" />
       <el-button v-if="running" class="stopButton" text circle :disabled="stopping" aria-label="停止生成" title="停止生成" @click="emit('stop')"><icon-player-stop-filled :size="14" /></el-button>
       <el-button class="sendButton" type="primary" circle :disabled="locked || (running && !!editingId)" :aria-label="sendLabel" :title="sendTitle" @click="submitDraft()"><icon-arrow-up :size="16" /></el-button>
@@ -53,7 +61,7 @@
 
 <script setup lang="ts">
 import { locale, t, translate } from "@toonflow/i18n/vue";
-import { computed, inject, ref, shallowRef, watch } from "vue";
+import { computed, inject, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import { IconArrowUp, IconMicrophone, IconPaperclip, IconPhoto, IconPlayerStopFilled } from "@tabler/icons-vue";
 import { ElMessage } from "element-plus";
 import { getReadableFileMimeType, readableFileAccept } from "@toonflow/server/documentFormats";
@@ -69,6 +77,8 @@ import attachmentList from "../attachmentList.vue";
 import { createPastedTextFile, readTextAttachment } from "../textAttachments";
 import type { AgentAttachment, AgentMessage } from "../types";
 import contextUsagePopover from "./contextUsage.vue";
+import { deepSeekBalance, refreshDeepSeekBalance } from "@/stores/deepseek";
+import { codebuddyCredits, refreshCodebuddyCredits } from "@/stores/codebuddy";
 import useVoiceInput from "./useVoiceInput";
 import xSender, { type AnyTagProps } from "x-sender";
 import "x-sender/lib/XSender.css";
@@ -77,6 +87,39 @@ const props = defineProps<{ active: boolean; disabled: boolean; busy: boolean; r
 const emit = defineEmits<{ submit: [mode?: "steer" | "followUp"]; stop: [] }>();
 const selectedModel = defineModel<string>("selectedModel", { required: true });
 const reasoningEffort = defineModel<string>("reasoningEffort", { required: true });
+
+// DeepSeek 余额 / 本轮消耗（仅当所选模型走 DeepSeek 官方时显示）
+const selectedModelInfo = computed<{ providerId: string; modelId: string } | null>(() => {
+  try {
+    const [providerId, modelId] = JSON.parse(selectedModel.value) as [string, string];
+    return { providerId, modelId };
+  } catch {
+    return null;
+  }
+});
+const isDeepSeek = computed(() => {
+  const info = selectedModelInfo.value;
+  // 仅 main（litellm）→ openai/deepseek-v4-flash 才是 DeepSeek 官方直连模型。
+  return !!info && info.providerId === "litellm";
+});
+const isCodebuddy = computed(() => {
+  const info = selectedModelInfo.value;
+  // codebuddy 系（含 dsv4.1f / hy3 / glm5.3f / step5）走 CodeBuddy CLI 计费。
+  return !!info && info.providerId === "codebuddy";
+});
+const deepseekBalanceText = computed(() => deepSeekBalance.value ? `${deepSeekBalance.value.total.toFixed(2)}` : "…");
+const codebuddyBalanceText = computed(() => codebuddyCredits.value?.officialBalance != null ? `${codebuddyCredits.value.officialBalance}` : "…");
+
+let balanceTimer: ReturnType<typeof setInterval> | undefined;
+onMounted(() => {
+  if (isDeepSeek.value) void refreshDeepSeekBalance(true);
+  if (isCodebuddy.value) void refreshCodebuddyCredits(true);
+  balanceTimer = setInterval(() => {
+    if (isDeepSeek.value) void refreshDeepSeekBalance();
+    if (isCodebuddy.value) void refreshCodebuddyCredits();
+  }, 60_000);
+});
+onUnmounted(() => { if (balanceTimer) clearInterval(balanceTimer); });
 const editingId = defineModel<string>("editingId");
 const recording = defineModel<boolean>("voiceActive", { default: false });
 const restoringAttachment = defineModel<boolean>("restoringAttachment", { default: false });
@@ -103,11 +146,18 @@ const senderMaxHeight = ref(Math.max(44, window.innerHeight / 2));
 let senderResize: { pointerId: number; y: number; height: number } | undefined;
 const contextMenuVisible = ref(false);
 const running = computed(() => props.busy || props.remoteRunning);
+// 每轮结束后刷新余额，看到账上余额变化（必须放在 running 声明之后，否则 TDZ 崩溃导致输入框丢失）
+watch(running, (now, before) => {
+  if (before && !now) {
+    if (isDeepSeek.value) void refreshDeepSeekBalance(true);
+    if (isCodebuddy.value) void refreshCodebuddyCredits(true);
+  }
+});
 const locked = computed(() => props.disabled || props.submitting || props.stopping || props.deletingId !== undefined || restoringAttachment.value || voiceActive.value);
 const sendLabel = computed(() => running.value ? "排队发送" : editingId.value ? "重发消息" : "发送消息");
 const sendTitle = computed(() => running.value ? "排队发送，本轮完成后处理（Enter）；Ctrl/Cmd + Enter 引导当前任务" : `${sendLabel.value}（Enter）`);
-const placeholder = computed(() => running.value ? translate("输入文字，Enter 排队，Ctrl/Cmd + Enter 引导…") : voiceSupported ? translate("输入消息，长按语音输入，@ 提及节点输出或全局素材…") : translate("输入消息，@ 提及节点输出或全局素材…"));
-const { voiceSupported, voiceState, voiceText, voiceActive, voiceButtonLabel, voiceLevel, armVoiceInput, startVoiceInput, clearVoicePress, cancelVoiceInput } = useVoiceInput({
+const placeholder = computed(() => running.value ? translate("输入文字，Enter 排队，Ctrl/Cmd + Enter 引导…") : voiceSupported ? translate("输入消息，点击语音按钮说话，@ 提及节点输出或全局素材…") : translate("输入消息，@ 提及节点输出或全局素材…"));
+const { voiceSupported, voiceState, voiceText, voiceActive, voiceButtonLabel, voiceLevel, startVoiceInput, stopVoiceInput, cancelVoiceInput } = useVoiceInput({
   getSender: () => sender,
   active: () => props.active,
   disabled: () => props.disabled,
@@ -291,7 +341,6 @@ async function restoreEditingDraft() {
 
 async function cancelEdit() {
   if (running.value || props.submitting || props.deletingId !== undefined || voiceActive.value) return;
-  clearVoicePress();
   await restoreEditingDraft();
 }
 
@@ -706,6 +755,49 @@ defineExpose({ getDraft, clearDraft, fillPrompt, fillQueuedMessage, editMessage,
       .modelPopover {
         flex: 1;
         margin-right: auto;
+      }
+
+      .balancePill {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        flex-shrink: 0;
+        font-size: 12px;
+        line-height: 1;
+        padding: 3px 8px 3px 6px;
+        border-radius: 999px;
+        background: var(--el-fill-color-light);
+        color: var(--el-text-color-secondary);
+
+        .dot {
+          width: 6px;
+          height: 6px;
+          flex-shrink: 0;
+          border-radius: 50%;
+          background: var(--el-color-primary);
+          box-shadow: 0 0 6px var(--el-color-primary);
+          animation: balanceBreath 2.2s ease-in-out infinite;
+        }
+
+        .value {
+          font-weight: 600;
+          font-variant-numeric: tabular-nums;
+          color: var(--el-text-color-primary);
+        }
+      }
+
+      @keyframes balanceBreath {
+        0%,
+        100% {
+          opacity: 0.35;
+          transform: scale(0.82);
+          box-shadow: 0 0 2px var(--el-color-primary);
+        }
+        50% {
+          opacity: 1;
+          transform: scale(1.12);
+          box-shadow: 0 0 10px var(--el-color-primary);
+        }
       }
 
       .contextButton {
