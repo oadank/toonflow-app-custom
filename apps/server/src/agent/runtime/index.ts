@@ -81,6 +81,7 @@ export async function run(
   mentions = agentMentionsSchema.parse(mentions);
   validateMentionTokens(prompt, mentions);
   if (!prompt.trim() && !attachments.length && !mentions.length) throw Object.assign(new Error("请输入消息、提及或添加附件"), { status: 400 });
+
   // CodeBuddy 引擎：整轮交给本机 codebuddy.exe，不走 pi-coding-agent 的 ModelRuntime。
   const rawProvider = getConfiguredProviders().find(item => item?.id === providerId) as { protocol?: string } | undefined;
   if (rawProvider?.protocol === "codebuddy-cli") {
@@ -102,7 +103,8 @@ export async function run(
     }, send);
     return;
   }
-  getAgentModelConfiguration(providerId, modelId, thinkingLevel);
+  await getAgentModelConfiguration(providerId, modelId, thinkingLevel);
+
   const attachmentContents: (z.infer<typeof agentAttachmentsSchema>[number] & { content?: string })[] = [];
   for (const attachment of attachments) {
     const { path } = await resolveWorkspacePath(cwd, attachment.path);
@@ -151,7 +153,7 @@ export async function run(
     send({ type: "accepted", runId: active.runId, message: { id: queueId, content: prompt.trim(), mode } });
     return;
   }
-  const { provider, runtime, effectiveThinkingLevel } = await createAgentModel(providerId, modelId, thinkingLevel);
+  const { provider, runtime, runtimeModel, effectiveThinkingLevel } = await createAgentModel(providerId, modelId, thinkingLevel);
   if (sessionPath) {
     const file = await stat(sessionPath).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") throw Object.assign(new Error("会话不存在，请重新打开对话"), { status: 404 });
@@ -220,7 +222,7 @@ export async function run(
       tools.push(tool);
     }
     tools.push(await createSubAgentTool({
-      cwd, tools, canvas, modelRuntime: runtime, model: runtime.getModel(providerId, modelId), thinkingLevel: effectiveThinkingLevel,
+      cwd, tools, canvas, modelRuntime: runtime, model: runtimeModel, thinkingLevel: effectiveThinkingLevel,
       runTask: (name, task, taskSignal, onProgress) => runDelegatedAgent({
         cwd, parentFile: file, name, task, providerId, modelId, thinkingLevel, canvas, signal: taskSignal, send, onProgress,
         onCanvasCancel: reason => { controller.abort(reason); onCanvasCancel?.(reason); },
@@ -246,7 +248,7 @@ export async function run(
       cwd,
       ...resources,
       modelRuntime: runtime,
-      model: runtime.getModel(providerId, modelId),
+      model: runtimeModel,
       thinkingLevel: effectiveThinkingLevel,
       sessionManager: history,
       tools: tools.map((tool) => tool.name),

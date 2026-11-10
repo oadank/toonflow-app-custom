@@ -3,6 +3,7 @@
     <CodeBuddyAccount />
     <CodeBuddyCredits />
     <div class="itemList">
+      <toonflowProviderCard scope="text" :provider="customProviders.find(item => item.id.toLowerCase() === 'toonflow')" />
       <el-card v-for="item in visibleProviders" :key="item.id" class="providerItem" shadow="never">
         <div class="providerHeader">
           <div v-if="item.icon" class="providerMark" aria-hidden="true">
@@ -45,8 +46,7 @@ import { customProviders, saveSettings, type CustomProvider } from "@/stores/set
 import { IconPlus, IconSettings, IconEdit, IconTrash } from "@tabler/icons-vue";
 import { languageProviders } from "@toonflow/providers";
 import CodeBuddyCredits from "./codebuddyCredits.vue";
-import CodeBuddyAccount from "./codebuddyAccount.vue";
-
+import CodeBuddyAccount from "./codebuddyAccount.vue";import toonflowProviderCard from "../../toonflowProviderCard.vue";
 defineProps<{ visible?: boolean }>();
 const addProviderDialog = shallowRef<Component>();
 const addCustomProviderDialog = shallowRef<Component>();
@@ -67,13 +67,14 @@ function openProvider() {
 }
 
 function openCustomProvider(provider?: CustomProvider) {
+  if (provider?.id.toLowerCase() === "toonflow") return;
   addCustomProviderDialog.value ??= defineAsyncComponent(() => import("./addCustomProviderDialog.vue"));
   editingProvider.value = provider;
   customProviderDialogVisible.value = true;
 }
 
 async function deleteProvider(id: string) {
-  if (deletingId.value) return;
+  if (id.toLowerCase() === "toonflow" || deletingId.value) return;
   deletingId.value = id;
   try {
     await saveSettings(settings => {
