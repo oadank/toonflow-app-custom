@@ -65,8 +65,6 @@ async function initialize() {
   if (requiresMobileWebViewUpdate) throw new Error("当前移动端浏览器内核缺少 Toonflow 所需能力。请更新 Toonflow 和系统浏览器内核；部分系统需要通过系统更新升级。更新完成后，请完全退出并重新打开 Toonflow。");
   const { session, app: tenantApp } = await initializeMultiTenant();
   app = tenantApp ?? await createCreationApp(session);
-  // [2026-11-10 合并] 本机定制的语言包注册改挂到实际 app 上（官方把 app 改成延迟创建）
-  app.onUnmount(registerLanguage());
   app.mount("#app");
   isMounted = true;
   if (!actualPlatform.isDesktop || session.publicWeb) return;
