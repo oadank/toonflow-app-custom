@@ -1,26 +1,6 @@
 import { IntlMessageFormat } from "intl-messageformat";
 import { escapeMessageText } from "./messageText.ts";
 export { escapeMessageText } from "./messageText.ts";
-import zhTw from "./locales/zhTw.json";
-import en from "./locales/en.json";
-import ja from "./locales/ja.json";
-import ru from "./locales/ru.json";
-import vi from "./locales/vi.json";
-import th from "./locales/th.json";
-import ko from "./locales/ko.json";
-import hi from "./locales/hi.json";
-import id from "./locales/id.json";
-import ms from "./locales/ms.json";
-import fil from "./locales/fil.json";
-import bn from "./locales/bn.json";
-import ur from "./locales/ur.json";
-import ta from "./locales/ta.json";
-import te from "./locales/te.json";
-import mr from "./locales/mr.json";
-import pa from "./locales/pa.json";
-import ar from "./locales/ar.json";
-import fa from "./locales/fa.json";
-import tr from "./locales/tr.json";
 
 export type Locale = "zh-CN" | "zh-TW" | "en" | "ja" | "ru" | "vi" | "th" | "ko" | "hi"
   | "id" | "ms" | "fil" | "bn" | "ur" | "ta" | "te" | "mr" | "pa" | "ar" | "fa" | "tr";
@@ -35,7 +15,44 @@ export const supportedLocales: { code: Locale; name: string }[] = [
   { code: "te", name: "తెలుగు" }, { code: "mr", name: "मराठी" }, { code: "pa", name: "ਪੰਜਾਬੀ" },
   { code: "ar", name: "العربية" }, { code: "fa", name: "فارسی" }, { code: "tr", name: "Türkçe" },
 ];
-const catalogs: Record<string, Record<string, string>> = { "zh-TW": zhTw, en, ja, ru, vi, th, ko, hi, id, ms, fil, bn, ur, ta, te, mr, pa, ar, fa, tr };
+// [2026-11-10] 语言包改动态 import 按需加载：原静态 import 把 20 种语言 8.66MB 全打进一个 chunk，
+// 用户只用自己的语言却要下载全部。动态 import 后每种语言独立 chunk，用时才拉（约 400-600KB）。
+// zh-CN（简中）内置为兜底，其余语言首次切换时加载后缓存。
+const catalogs: Record<string, Record<string, string>> = { "zh-CN": {} };
+const loadedLocales = new Set<string>(["zh-CN"]);
+const localeLoaders: Record<string, () => Promise<{ default: Record<string, string> }>> = {
+  "zh-TW": () => import("./locales/zhTw.json"),
+  "en": () => import("./locales/en.json"),
+  "ja": () => import("./locales/ja.json"),
+  "ru": () => import("./locales/ru.json"),
+  "vi": () => import("./locales/vi.json"),
+  "th": () => import("./locales/th.json"),
+  "ko": () => import("./locales/ko.json"),
+  "hi": () => import("./locales/hi.json"),
+  "id": () => import("./locales/id.json"),
+  "ms": () => import("./locales/ms.json"),
+  "fil": () => import("./locales/fil.json"),
+  "bn": () => import("./locales/bn.json"),
+  "ur": () => import("./locales/ur.json"),
+  "ta": () => import("./locales/ta.json"),
+  "te": () => import("./locales/te.json"),
+  "mr": () => import("./locales/mr.json"),
+  "pa": () => import("./locales/pa.json"),
+  "ar": () => import("./locales/ar.json"),
+  "fa": () => import("./locales/fa.json"),
+  "tr": () => import("./locales/tr.json"),
+};
+export async function ensureLocaleLoaded(locale: Locale): Promise<boolean> {
+  if (loadedLocales.has(locale)) return true;
+  const loader = localeLoaders[locale];
+  if (!loader) return false;
+  try {
+    const mod = await loader();
+    catalogs[locale] = mod.default;
+    loadedLocales.add(locale);
+    return true;
+  } catch { return false; }
+}
 let activeLocale: Locale = "zh-CN";
 const listeners = new Set<(locale: Locale) => void>();
 const formatters = new Map<string, IntlMessageFormat>();

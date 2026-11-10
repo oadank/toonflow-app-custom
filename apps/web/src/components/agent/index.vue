@@ -281,7 +281,9 @@ async function renameConversation(file: string, value: string) {
   const directory = workspaceStore.project?.directory;
   const item = history.value.find(item => item.file === file);
   const nextName = value.trim();
-  if (!directory || loading.value || historyLoading.value || (!item && file !== sessionFile.value)) return;
+  // 🔴 改名是独立的 PATCH，不该被「正在加载对话 / 正在生成」挡掉。
+  //    以前对话在跑时 loading=true，改名请求被直接吞掉，界面看着改了、刷新又变回第一句话。
+  if (!directory || (!item && file !== sessionFile.value)) return;
   if (!nextName || nextName.length > 80) return ElMessage.warning("请输入 1–80 个字符的对话名称");
   if (nextName === (file === sessionFile.value ? name.value : item?.name)) return;
   const currentRequest = ++requestId;

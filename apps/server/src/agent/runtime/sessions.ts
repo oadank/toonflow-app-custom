@@ -104,7 +104,15 @@ export async function stopAgentRuns(cwd: string, runIds: string[]) {
     const path = await run.directory;
     if (!path || sessionKey(path) !== directory || activeRuns.get(runId) !== run) return;
     run.abort();
-    await run.finished;
+    // [2026-11-10] 停止必须有时限：abort 只发信号，若当前正在跑的工具（如 node:getGenerationStatus
+    // 轮询）不检查 signal，run.finished 永不 resolve → 整个 HTTP 请求挂死 → 前端只等到
+    // "signal timed out"，看着就是「停止按钮完全没反应」。这里最多等 8 秒，超时就强制摘除
+    // 登记（activeRuns 删掉后，即使旧循环还在跑，新的停止/新会话也不会被它阻塞）。
+    await Promise.race([
+      run.finished,
+      new Promise<void>(resolve => setTimeout(resolve, 8000)),
+    ]);
+    if (activeRuns.get(runId) === run) activeRuns.delete(runId);
   }));
 }
 
@@ -443,12 +451,36 @@ export async function appendAgentCredits(cwd: string, path: string, data: z.infe
   }
 }
 
-export async function renameAgentSession(cwd: string, path: string, name: string) {  const release = lockWorkspaceFiles([path]);
+// 🔴 会话名独立持久化（2026-11-07 老大报「我自己改过，它自动改回」）：
+//    会话文件每轮都在 append / 重写，写在里面的 session_info 有可能丢；一丢就退回用第一句话当标题，
+//    连带把 {{mention:...}} 原样显示出来。单独存一份名字表，读取时优先用，改名不再依赖会话文件。
+function sessionNamesPath(cwd: string) { return resolve(cwd, ".agent", "session-names.json"); }
+async function readSessionNames(cwd: string): Promise<Record<string, string>> {
+  try {
+    const value: unknown = JSON.parse(await readFile(sessionNamesPath(cwd), "utf8"));
+    return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, string> : {};
+  } catch { return {}; }
+}
+function cleanSessionTitle(text: string, mentions?: { id?: string; label?: string }[]): string {
+  return text
+    .replace(/\{\{mention:([^{}]+)\}\}/g, (_all, id: string) => {
+      const label = mentions?.find(item => item.id === id)?.label;
+      return label ? `@${label}` : "";
+    })
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export async function renameAgentSession(cwd: string, path: string, name: string) {
+  const release = lockWorkspaceFiles([path]);
   try {
     const entries = parseSessionEntries(await readFile(path, "utf8"));
     if (entries[0]?.type !== "session") throw Object.assign(new Error("会话文件无效"), { status: 400 });
     const history = SessionManager.open(path, dirname(path), cwd);
     history.appendSessionInfo(name);
+    const names = await readSessionNames(cwd);
+    names[basename(path)] = name;
+    await writeWorkspaceFile(sessionNamesPath(cwd), JSON.stringify(names, null, 2), false);
     return { name: history.getSessionName()! };
   } finally {
     release();
@@ -459,12 +491,13 @@ export async function listAgentSessions(cwd: string, directory: string) {
   const files = new Set((await readdir(directory, { withFileTypes: true })).filter((item) => item.isFile()).map((item) => item.name));
   // 克隆项目会保留原始 .agent 会话，header.cwd 仍指向源项目；以当前工作区目录中的文件为准列出历史。
   const sessions = await SessionManager.listAll(directory);
+  const savedNames = await readSessionNames(cwd);
   return Promise.all(sessions
     .filter((item) => files.has(basename(item.path)) && !item.parentSessionPath)
     .sort((left, right) => right.modified.getTime() - left.modified.getTime())
     .map(async (item) => ({
       file: basename(item.path),
-      name: item.name || (await getAgentSession(cwd, item.path)).name,
+      name: savedNames[basename(item.path)] || cleanSessionTitle(item.name || (await getAgentSession(cwd, item.path)).name),
       modified: item.modified,
       messageCount: item.messageCount,
     })));
@@ -641,9 +674,14 @@ export async function getAgentSession(cwd: string, path: string) {
     const interrupted = agent.status === "running" && !active && !child;
     subAgents.set(agent.file, { ...(interrupted ? { ...agent, status: "cancelled" as const, result: translateMessage("上次运行已中断") } : agent), runId: child?.runId });
   }
+  const savedName = (await readSessionNames(cwd))[basename(path)];
+  const fallbackName = cleanSessionTitle(
+    firstUserMessage?.content.trim() || firstUserMessage?.attachments?.[0]?.name || "",
+    firstUserMessage?.mentions as { id?: string; label?: string }[] | undefined,
+  ).slice(0, 60);
   return {
     file: basename(path),
-    name: history.getSessionName() || (firstUserMessage?.content.trim() || firstUserMessage?.attachments?.[0]?.name)?.slice(0, 60) || translateMessage("新对话"),
+    name: savedName || history.getSessionName() || fallbackName || translateMessage("新对话"),
     messages,
     stats: getAgentStats(history),
     contextUsage: getAgentContext(history, active?.session?.model?.contextWindow ?? (configuredModel && model ? getModelLimits(model.provider, configuredModel).contextWindow : 0)),

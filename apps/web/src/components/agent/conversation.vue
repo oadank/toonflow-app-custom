@@ -223,11 +223,13 @@ function receiveEvent(event: AgentEvent) {
 /** 每轮结束把余额 + 本轮消耗挂到该条 assistant 消息上，并写进会话文件（刷新后 pill 仍在）。 */
 async function attachCredits(message?: AgentMessage) {
   if (!message || message.role !== "assistant" || message.credits) return;
-  // 计费体系不同：codebuddy 系 = CodeBuddy 账号积分（CLI 实扣）；main(litellm) = DeepSeek 官方余额（按 token 估算）。
-  const provider = selectedModelChoice.value?.providerId;
+  // 刷新后模型下拉可能还没就绪（selectedModelChoice 为空），别因此把积分 pill 吞掉。
+  // 只有明确是 litellm 才走 DeepSeek 官方余额；其余（含 codebuddy 系 / 未就绪）按 CodeBuddy 积分口径，
+  // hy3 之类的免费模型 runCost=0 也照样显示「本轮 0 分」。
+  const provider = selectedModelChoice.value?.providerId ?? props.initialSession?.providerId;
   try {
     let credits: { balance: number | null; runCost: number | null; unit: "cny" | "credit" } | undefined;
-    if (provider === "codebuddy") {
+    if (provider !== "litellm") {
       const { data } = await axios.get("/api/codebuddy/credits", { timeout: 30000 });
       if (data.code === 200) {
         credits = { balance: data.data.officialBalance ?? null, runCost: data.data.runCost ?? null, unit: "credit" };

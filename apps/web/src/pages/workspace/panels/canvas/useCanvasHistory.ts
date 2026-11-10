@@ -1,5 +1,5 @@
 import { computed, nextTick, onScopeDispose, ref, shallowRef, watch } from "vue";
-import { debounce } from "lodash-es";
+import debounce from "lodash-es/debounce.js";
 import { useVueFlow, type Node, type Edge } from "@vue-flow/core";
 import { useNodeEvent } from "@toonflow/nodes-scaffold/nodeEvent";
 

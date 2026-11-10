@@ -64,7 +64,7 @@ export async function writeAssetFile(path: string, content: string | Uint8Array,
 export async function createAssetDirectory(path: string) {
   const target = await resolveAssetPath(path);
   const release = lockWorkspaceFiles([target.path]);
-  try { await mkdir(target.path); }
+  try { await mkdir(target.path, { recursive: true }); }
   finally { release(); }
 }
 

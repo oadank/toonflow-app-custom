@@ -1,6 +1,6 @@
 import axios, { type AxiosInstance } from "axios";
 import { computed, watch } from "vue";
-import { detectLocale, isRtlLocale } from "@toonflow/i18n";
+import { detectLocale, isRtlLocale, ensureLocaleLoaded } from "@toonflow/i18n";
 import { locale, setLocale, translate } from "@toonflow/i18n/vue";
 import { uiSettings } from "@/stores/settings";
 import type { LocaleConfig } from "vue-stream-markdown";
@@ -36,7 +36,12 @@ export function registerApiLanguage(client: AxiosInstance) {
 }
 
 export function registerLanguage() {
-  const applyLanguage = () => setLocale(uiSettings.value.language === "system" ? detectLocale(navigator.languages) : uiSettings.value.language);
+  // [2026-11-10] 语言包改动态加载后，切换前必须先 ensureLocaleLoaded，否则同步 translate 拿不到
+  // catalog 会闪英文 key。flush:"sync" 保留，加载完成后才 setLocale。
+  const applyLanguage = () => {
+    const target = uiSettings.value.language === "system" ? detectLocale(navigator.languages) : uiSettings.value.language;
+    void ensureLocaleLoaded(target).then(ok => { if (ok) setLocale(target); });
+  };
   const stopSettings = watch(() => uiSettings.value.language, applyLanguage, { immediate: true, flush: "sync" });
   const stopDocument = watch(locale, value => {
     document.documentElement.lang = value;

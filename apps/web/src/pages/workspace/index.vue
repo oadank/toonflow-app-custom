@@ -159,6 +159,9 @@ function preventSideButtonNavigation(event: MouseEvent) {
 onMounted(() => {
   anonymousData.track("workspace.canvas");
   for (const eventName of sideButtonEvents) window.addEventListener(eventName, preventSideButtonNavigation, true);
+  // 画布组件此时已挂载，读取该画布记住的助手显隐；切画布时重新套用（新画布默认隐藏）。
+  applyAgentVisibility();
+  watch(canvasVisibilityKey, () => applyAgentVisibility());
 });
 onScopeDispose(() => {
   for (const eventName of sideButtonEvents) window.removeEventListener(eventName, preventSideButtonNavigation, true);
@@ -169,8 +172,31 @@ const panelOptions = [
   { label: "画布", value: "canvas", icon: IconVector },
   { label: "文档", value: "document", icon: IconFileText },
 ];
-// [2026-11-05 老大令] 助手面板默认收起，别每次进来都占着画布；点右上角 Agent 按钮再展开
+// [2026-11-07 老大令] 助手面板按「画布」记住显隐；没记录的新画布默认隐藏。
+// 之前是写死 false，刷新就收起，老大嫌不方便。
+const AGENT_VISIBILITY_KEY = "toonflow.agentVisibleByCanvas";
+function agentVisibilityMap(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(AGENT_VISIBILITY_KEY);
+    const value = raw ? JSON.parse(raw) : {};
+    return value && typeof value === "object" ? value as Record<string, boolean> : {};
+  } catch { return {}; }
+}
+function canvasVisibilityKey() {
+  return `${workspaceStore.project?.directory ?? ""}::${canvasPanelRef.value?.canvasId ?? ""}`;
+}
+function applyAgentVisibility() {
+  const key = canvasVisibilityKey();
+  agentVisible.value = key ? (agentVisibilityMap()[key] ?? false) : false;
+}
 const agentVisible = ref(false);
+watch(agentVisible, value => {
+  const key = canvasVisibilityKey();
+  if (!key || key.endsWith("::")) return;
+  const map = agentVisibilityMap();
+  map[key] = value;
+  try { localStorage.setItem(AGENT_VISIBILITY_KEY, JSON.stringify(map)); } catch { /* 浏览器禁用存储时不记忆 */ }
+});
 const agentWidth = ref(0);
 const settingsVisible = ref(false);
 const helpVisible = ref(false);

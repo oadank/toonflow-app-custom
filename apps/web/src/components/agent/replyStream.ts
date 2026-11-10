@@ -1,5 +1,5 @@
 import { reactive, type Ref } from "vue";
-import { throttle } from "lodash-es";
+import throttle from "lodash-es/throttle.js";
 import type { AgentEvent } from "@toonflow/server/agent/types";
 import type { AgentMessage, AgentMessagePart } from "./types";
 

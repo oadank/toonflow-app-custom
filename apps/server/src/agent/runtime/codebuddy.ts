@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile, rm, stat } from "node:fs/promises";
-import { statSync, readFileSync } from "node:fs";
+import { statSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -45,9 +45,24 @@ export type CodeBuddyRunRecord = {
   at: number;
   startedAt: number;
 };
-const codebuddyRuns: CodeBuddyRunRecord[] = [];
+// 🔴 轮次记录落盘：以前只存内存，服务一重启 turns 清空 → 界面「本轮」变 —，
+//    免费模型（hy3）该显示的 0 分也跟着没了。落盘后重启照样能对上官方账。
+const codebuddyRuns: CodeBuddyRunRecord[] = loadCodebuddyRuns();
 export function getCodebuddyRuns() {
   return codebuddyRuns.slice();
+}
+function runsFile() { return join(dataDir(), "codebuddyRuns.json"); }
+function loadCodebuddyRuns(): CodeBuddyRunRecord[] {
+  try {
+    const value: unknown = JSON.parse(readFileSync(runsFile(), "utf8"));
+    return Array.isArray(value) ? (value as CodeBuddyRunRecord[]).slice(0, 50) : [];
+  } catch { return []; }
+}
+function saveCodebuddyRuns() {
+  try {
+    mkdirSync(dataDir(), { recursive: true });
+    writeFileSync(runsFile(), JSON.stringify(codebuddyRuns.slice(0, 50)), "utf8");
+  } catch { /* 落盘失败不影响对话 */ }
 }
 
 /** 运行中收到的新消息（steer=插队立即处理 / followUp=本轮结束后处理）。 */
@@ -176,6 +191,19 @@ async function writeCodebuddyMd(cwd: string) {
     "",
     "## 全局协作规范",
     rules || "（未配置 AGENTS.md）",
+    "",
+    "## 省调用规矩（直接决定积分消耗，优先级最高）",
+    "- 每多一次模型往返就多扣一次钱。能用 1 次工具拿到的信息，绝不拆成 5 次。",
+    "- 同一个会话里「技能库总表」只查一次，查过就记住，后续轮次不要再查。",
+    "- 常用技能路径是固定的，要用直接 read 文件，不要先查总表：",
+    "  · H3 视频提示词：C:\\D\\opt\\agents-to-feishu\\skills\\h3-video\\SKILL.md",
+    "  · 生图提示词：C:\\D\\opt\\agents-to-feishu\\skills\\img-prompt-engine\\SKILL.md",
+    "  · ComfyUI / 8090 排障：C:\\D\\opt\\agents-to-feishu\\skills\\comfyui-ops\\SKILL.md",
+    "- 🔴 只读工具必须**一次并行发完**，不要「调一个、看结果、再调下一个」：",
+    "  查画布全貌优先用 `getSnapshot`（一次拿齐 appState / canvas / nodes / edges），",
+    "  需要更细时再并行发 getCanvasNodes / getCanvasEdges / getNodeTools / read / fileInfo。",
+    "- 同一张图、同一个文件不要重复读；拿到结果先自己判断，别反复确认。",
+    "- 一次能干完的活不要分步请示，中途不要重复汇报进度。",
     "",
     MARKER_END,
     "",
@@ -394,6 +422,7 @@ export async function runCodeBuddyAgent(options: CodeBuddyAgentOptions, send: (e
         if (turnSessionId) {
           codebuddyRuns.unshift({ runId, sessionId: turnSessionId, modelId, at: Date.now(), startedAt });
           if (codebuddyRuns.length > 50) codebuddyRuns.length = 50;
+          saveCodebuddyRuns();
         }
         // 🔴 用量口径（2026-11-07 两轮 --resume 实测定死，别改回去）：
         //   顶层 usage 是**整个会话累计**，而且 input_tokens 已经把 cache 并进去了
@@ -437,6 +466,24 @@ export async function runCodeBuddyAgent(options: CodeBuddyAgentOptions, send: (e
           map[sessionFile] = turnSessionId;
           void writeFile(join(cwd, SESSION_MAP), JSON.stringify(map, null, 2), "utf8").catch(() => {});
         }
+        // 🔴 排队消息直接在同一个 CLI 进程里续写，不 kill、不 --resume 重开。
+        //    实测：result 之后 CLI 会继续等 stdin 的下一条 user 消息，上下文与 session_id 都不变，
+        //    第二条能记住第一条的内容。这样每条排队消息都省掉一次整轮首跳（3 分级）。
+        //    运行中真正插队（killForSteer）仍由外层 for 循环重开，即时中断语义不变。
+        const steerNext = active?.steer.shift();
+        const queued = steerNext ?? active?.followUp.shift();
+        if (queued && !aborted && !killedForSteer) {
+          persistUser(queued.prompt);
+          const nextText = steerNext
+            ? `${cbMarker}${steerGuidance}${queued.prompt}`
+            : `${cbMarker}${queued.prompt}`;
+          child.stdin.write(`${JSON.stringify({
+            type: "user",
+            message: { role: "user", content: [{ type: "text", text: nextText }] },
+          })}\n`);
+          return; // 不 settle：继续等本进程的下一个 result
+        }
+        try { child.stdin.end(); } catch { /* 已关闭 */ }
         settle({
           sessionId: turnSessionId, killedForSteer: false, aborted: false,
           error: (event.is_error || event.subtype !== "success") ? String(event.result || "CodeBuddy 运行失败") : undefined,
@@ -444,6 +491,9 @@ export async function runCodeBuddyAgent(options: CodeBuddyAgentOptions, send: (e
       }
     };
 
+    // 🔴 [2026-11-07 老大令] 超时已关闭：不按整轮时长、也不按静默时长自动杀进程。
+    //    旧的「10 分钟绝对 deadline」把 17:21:22~17:32:48 那轮（11分26秒、15 次工具调用全程有活动）误杀了。
+    //    现在只有三种结束方式：CLI 自己返回 result / 进程退出 / 用户在界面点停止（signal abort）。
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       buffer += chunk;
@@ -470,14 +520,12 @@ export async function runCodeBuddyAgent(options: CodeBuddyAgentOptions, send: (e
       type: "user",
       message: { role: "user", content: [{ type: "text", text: turnPrompt }] },
     })}\n`);
-    // 单轮模式：写完就关 stdin，别让 CLI 一直等下一条（否则 result 永远不来，卡到超时）。
-    child.stdin.end();
+    // 🔴 不关 stdin：result 之后可能还有排队消息要续写（见 handle 的 result 分支）。
+    //    没有排队消息时才在那里 end；中途插队 / abort / 超时由各自路径收尾。
+    //    关早了 CLI 会直接退出，长驻复用就无从谈起。
 
-    const timer = setTimeout(() => {
-      if (!settled) { try { child.kill(); } catch { /* 已退出 */ } settle({ sessionId: turnSessionId, killedForSteer, aborted, error: "CodeBuddy 超时（10 分钟）" }); }
-    }, 10 * 60_000);
+    // 没有超时定时器：任务想跑多久就跑多久，停止权完全交给用户（signal.abort）。
     const outcome = await done;
-    clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
     interruptChild = undefined;
     return outcome;

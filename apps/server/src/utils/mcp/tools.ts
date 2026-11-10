@@ -175,7 +175,7 @@ export async function getMcpTools(): Promise<McpTool[]> {
         const bytes = Buffer.from(args.base64, "base64");
         if (bytes.length > 20 * 1024 * 1024) throw new Error("文件不能超过20MB");
         await writeWorkspaceFile(source.path, bytes, args.exclusive);
-      } else if (args.action === "mkdir") await mkdir(source.path);
+      } else if (args.action === "mkdir") await mkdir(source.path, { recursive: true });
       else if (destination) await renameWorkspaceFile(source.path, destination.path);
       else await removeWorkspaceFile(directory!, source.path, args.recursive);
     } finally { release(); }

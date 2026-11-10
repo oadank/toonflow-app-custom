@@ -260,7 +260,22 @@ export function useNodeGeneration(outputs: Readonly<Ref<NodeOutputs>>, cancel: (
     const task = savedData.value.mediaTask;
     if (!path || !options || !task || generating.value || !needsRecovery() || attemptedTaskId === task.taskId) return;
     attemptedTaskId = task.taskId;
-    void resume().catch(error => { if (!lifetime.signal.aborted) showNodeError(error, "生成任务恢复失败"); });
+    void resume().catch(error => {
+      if (lifetime.signal.aborted) return;
+      // 刷新时节点本地缓存可能还是「进行中」，服务端其实已经取消 / 中断。
+      // 这是正常终态，不是恢复失败：静默把本地记录同步成 cancelled，别弹红框吓人。
+      const message = error instanceof Error ? error.message : String(error ?? "");
+      const aborted = error instanceof DOMException && error.name === "AbortError";
+      if (aborted || /生成已取消|已取消|499/.test(message)) {
+        if (savedData.value.mediaTask?.taskId === task.taskId) {
+          savedData.value.mediaTask.state = "cancelled";
+          savedData.value.mediaTask.resumable = false;
+          void getPersistence?.()?.save?.().catch(() => {});
+        }
+        return;
+      }
+      showNodeError(error, "生成任务恢复失败");
+    });
   }, { immediate: true, flush: "post" });
   watch(outputs, () => {
     // 保留用户替换或编辑的输出；未决任务仍须复查完成或明确放弃，不能借此重新提交。
